@@ -10,7 +10,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -18,40 +17,92 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/openweft/weft-microvm-init/pkg/pod"
-	introspectv1 "github.com/openweft/weft-proto/introspectv1"
+	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
 	"github.com/openweft/weft-microvm-agent/pkg/cubefs"
 	"github.com/openweft/weft-microvm-agent/pkg/introspectsrv"
 	agentmesh "github.com/openweft/weft-microvm-agent/pkg/mesh"
-	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
 	agentmounts "github.com/openweft/weft-microvm-agent/pkg/mounts"
 	agentproperties "github.com/openweft/weft-microvm-agent/pkg/properties"
 	agentsshd "github.com/openweft/weft-microvm-agent/pkg/sshd"
 	agentsshkeys "github.com/openweft/weft-microvm-agent/pkg/sshkeys"
+	"github.com/openweft/weft-microvm-init/pkg/pod"
+	introspectv1 "github.com/openweft/weft-proto/introspectv1"
+	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 )
 
-func main() {
-	listenAddr := flag.String("listen", "0.0.0.0:51999", "address to serve the Introspect API on (set to the VM's wg0 IP:port)")
-	meshVMID := flag.String("mesh-vm-id", "", "this VM's id; when set, subscribe to mesh updates on the event bus")
-	mountsVMID := flag.String("mounts-vm-id", "", "this VM's id; when set, subscribe to dynamic share-mount updates on the event bus")
-	sshKeysVMID := flag.String("sshkeys-vm-id", "", "this VM's id; when set, subscribe to dynamic SSH-keys updates on the event bus")
-	sshKeysAuthorizedKeys := flag.String("sshkeys-authorized-keys", "/root/.ssh/authorized_keys", "path to the authorized_keys file the sshkeys subscriber rewrites on each update")
-	sshKeysUID := flag.Int("sshkeys-uid", 0, "uid to chown authorized_keys to (-1 to skip)")
-	sshKeysGID := flag.Int("sshkeys-gid", 0, "gid to chown authorized_keys to (-1 to skip)")
-	propsVMID := flag.String("properties-vm-id", "", "this VM's id; when set, subscribe to dynamic property updates on the event bus")
-	propsDir := flag.String("properties-dir", "/run/weft/properties", "directory under which guest-readable properties are mirrored (file-per-key, nested on '/')")
-	sshdListen := flag.String("sshd-listen", "", "address for the embedded SSH server (e.g. \"0.0.0.0:2222\" on the wg0 IP) ; empty disables it")
-	sshdHostKey := flag.String("sshd-host-key", "/var/lib/weft/sshd_host_ed25519", "path to the persistent ed25519 host key for the embedded sshd (generated on first boot)")
-	sshdShell := flag.String("sshd-shell", "/bin/sh", "shell binary execed on accepted sessions ; runs in the VM's PID-1 namespace, not the container's")
-	bootWatch := flag.Bool("boot-watch", false, "watch the property tree for weft.boot/* and run first-boot provisioning once on appearance")
-	bootWorkDir := flag.String("boot-workdir", "/var/lib/weft/boot", "parent directory for the boot payload ; <workdir>/payload is the git clone target + script CWD")
-	bootSentinel := flag.String("boot-sentinel", "/var/lib/weft/provisioned", "sentinel file ; once present, boot provisioning is skipped (idempotent across reboots)")
-	shareMounts := flag.String("share-mounts", "", "path to a JSON array of boot-time share mounts to apply at startup")
-	natsURL := flag.String("nats-url", nats.DefaultURL, "event-bus URL for mesh/mount updates")
-	natsCreds := flag.String("nats-creds", "", "path to NATS credentials (the per-project creds staged into the VM)")
-	flag.Parse()
+// opts is the agent's runtime config. Cobra binds every flag onto one of
+// these fields so the RunE handler is a pure run(opts) — no globals, no
+// pointer-deref, easy to feed from tests too.
+type opts struct {
+	listenAddr            string
+	meshVMID              string
+	mountsVMID            string
+	sshKeysVMID           string
+	sshKeysAuthorizedKeys string
+	sshKeysUID            int
+	sshKeysGID            int
+	propsVMID             string
+	propsDir              string
+	sshdListen            string
+	sshdHostKey           string
+	sshdShell             string
+	bootWatch             bool
+	bootWorkDir           string
+	bootSentinel          string
+	shareMounts           string
+	natsURL               string
+	natsCreds             string
+}
 
+func main() {
+	var o opts
+	cmd := &cobra.Command{
+		Use:   "weft-microvm-agent",
+		Short: "Guest-side agent for openweft microVMs (Introspect gRPC over wg0 + NATS-driven dynamic config)",
+		Long: `weft-microvm-agent runs as a long-lived in-guest service inside an openweft
+microVM. It exposes the read-only Introspect gRPC API to an operator over the
+kernel WireGuard overlay (wg0) and, when given a per-VM id and a NATS URL,
+subscribes to mesh / share-mount / SSH-keys / property updates and applies
+them idempotently with replace-by-ID semantics.
+
+All transports rely on wg0 for confidentiality; the gRPC server itself uses
+insecure credentials.`,
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return run(o)
+		},
+	}
+
+	f := cmd.Flags()
+	f.StringVar(&o.listenAddr, "listen", "0.0.0.0:51999", "address to serve the Introspect API on (set to the VM's wg0 IP:port)")
+	f.StringVar(&o.meshVMID, "mesh-vm-id", "", "this VM's id; when set, subscribe to mesh updates on the event bus")
+	f.StringVar(&o.mountsVMID, "mounts-vm-id", "", "this VM's id; when set, subscribe to dynamic share-mount updates on the event bus")
+	f.StringVar(&o.sshKeysVMID, "sshkeys-vm-id", "", "this VM's id; when set, subscribe to dynamic SSH-keys updates on the event bus")
+	f.StringVar(&o.sshKeysAuthorizedKeys, "sshkeys-authorized-keys", "/root/.ssh/authorized_keys", "authorized_keys file the sshkeys subscriber rewrites on each update")
+	f.IntVar(&o.sshKeysUID, "sshkeys-uid", 0, "uid to chown authorized_keys to (-1 to skip)")
+	f.IntVar(&o.sshKeysGID, "sshkeys-gid", 0, "gid to chown authorized_keys to (-1 to skip)")
+	f.StringVar(&o.propsVMID, "properties-vm-id", "", "this VM's id; when set, subscribe to dynamic property updates on the event bus")
+	f.StringVar(&o.propsDir, "properties-dir", "/run/weft/properties", "directory under which guest-readable properties are mirrored (file-per-key, nested on '/')")
+	f.StringVar(&o.sshdListen, "sshd-listen", "", `address for the embedded SSH server (e.g. "0.0.0.0:2222" on the wg0 IP); empty disables it`)
+	f.StringVar(&o.sshdHostKey, "sshd-host-key", "/var/lib/weft/sshd_host_ed25519", "persistent ed25519 host key for the embedded sshd (generated on first boot)")
+	f.StringVar(&o.sshdShell, "sshd-shell", "/bin/sh", "shell binary execed on accepted sessions; runs in the VM's PID-1 namespace, not the container's")
+	f.BoolVar(&o.bootWatch, "boot-watch", false, "watch the property tree for weft.boot/* and run first-boot provisioning once on appearance")
+	f.StringVar(&o.bootWorkDir, "boot-workdir", "/var/lib/weft/boot", "parent directory for the boot payload; <workdir>/payload is the git clone target + script CWD")
+	f.StringVar(&o.bootSentinel, "boot-sentinel", "/var/lib/weft/provisioned", "sentinel file; once present, boot provisioning is skipped (idempotent across reboots)")
+	f.StringVar(&o.shareMounts, "share-mounts", "", "path to a JSON array of boot-time share mounts to apply at startup")
+	f.StringVar(&o.natsURL, "nats-url", nats.DefaultURL, "event-bus URL for mesh/mount updates")
+	f.StringVar(&o.natsCreds, "nats-creds", "", "path to NATS credentials (the per-project creds staged into the VM)")
+
+	if err := cmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// run is the daemon body. It returns an error so cobra can surface it
+// without forcing the helpers below to call log.Fatal. The final
+// gRPC Serve call blocks; an early exit before it means a setup error.
+func run(o opts) error {
 	logger := log.Default()
 
 	// cfs-client ships in the initramfs at /bin/cfs-client (placed by the
@@ -63,72 +114,71 @@ func main() {
 	// dynamic unmount can target a boot-time mount by ID.
 	reg := cubefs.NewRegistry()
 
-	if *shareMounts != "" {
-		if err := applyBootMounts(*shareMounts, reg, logger); err != nil {
-			logger.Fatalf("weft-microvm-agent: share mounts: %v", err)
+	if o.shareMounts != "" {
+		if err := applyBootMounts(o.shareMounts, reg, logger); err != nil {
+			return fmt.Errorf("share mounts: %w", err)
 		}
 	}
 
-	if *meshVMID != "" {
-		if err := startMesh(*natsURL, *natsCreds, *meshVMID, logger); err != nil {
-			logger.Fatalf("weft-microvm-agent: mesh: %v", err)
+	if o.meshVMID != "" {
+		if err := startMesh(o.natsURL, o.natsCreds, o.meshVMID, logger); err != nil {
+			return fmt.Errorf("mesh: %w", err)
 		}
 	}
 
-	if *mountsVMID != "" {
-		if err := startMounts(*natsURL, *natsCreds, *mountsVMID, reg, logger); err != nil {
-			logger.Fatalf("weft-microvm-agent: mounts: %v", err)
+	if o.mountsVMID != "" {
+		if err := startMounts(o.natsURL, o.natsCreds, o.mountsVMID, reg, logger); err != nil {
+			return fmt.Errorf("mounts: %w", err)
 		}
 	}
 
-	// Shared AuthStore : the sshkeys subscriber writes into it on
-	// every NATS push ; the embedded sshd reads from it on every
-	// connection. One source of truth for "which keys can SSH in
-	// right now". Created unconditionally — cheap, harmless when
-	// neither subscriber nor sshd are started.
+	// Shared AuthStore: the sshkeys subscriber writes into it on every NATS
+	// push; the embedded sshd reads from it on every connection. One source
+	// of truth for "which keys can SSH in right now". Created unconditionally
+	// — cheap, harmless when neither subscriber nor sshd are started.
 	authStore := agentsshd.NewAuthStore()
 
-	if *sshKeysVMID != "" {
-		if err := startSSHKeys(*natsURL, *natsCreds, *sshKeysVMID,
-			*sshKeysAuthorizedKeys, *sshKeysUID, *sshKeysGID, authStore, logger); err != nil {
-			logger.Fatalf("weft-microvm-agent: sshkeys: %v", err)
+	if o.sshKeysVMID != "" {
+		if err := startSSHKeys(o.natsURL, o.natsCreds, o.sshKeysVMID,
+			o.sshKeysAuthorizedKeys, o.sshKeysUID, o.sshKeysGID, authStore, logger); err != nil {
+			return fmt.Errorf("sshkeys: %w", err)
 		}
 	}
 
-	if *sshdListen != "" {
-		if err := startSSHD(*sshdListen, *sshdHostKey, *sshdShell, authStore, logger); err != nil {
-			logger.Fatalf("weft-microvm-agent: sshd: %v", err)
+	if o.sshdListen != "" {
+		if err := startSSHD(o.sshdListen, o.sshdHostKey, o.sshdShell, authStore, logger); err != nil {
+			return fmt.Errorf("sshd: %w", err)
 		}
 	}
 
-	// First-boot provisioning : watch the property tree for
-	// weft.boot/* to appear, then run the configured payload + script
-	// exactly once (sentinel-guarded). Disabled when --boot-watch
-	// isn't set ; also a fast no-op when the sentinel already exists
-	// (i.e. on subsequent reboots).
-	if *bootWatch {
-		runner := bootRunner(*bootWorkDir, *bootSentinel, logger.Writer())
-		go watchAndRunBoot(*propsDir, runner, logger)
+	// First-boot provisioning: watch the property tree for weft.boot/* to
+	// appear, then run the configured payload + script exactly once
+	// (sentinel-guarded). Disabled when --boot-watch isn't set; also a fast
+	// no-op when the sentinel already exists (subsequent reboots).
+	if o.bootWatch {
+		runner := bootRunner(o.bootWorkDir, o.bootSentinel, logger.Writer())
+		go watchAndRunBoot(o.propsDir, runner, logger)
 	}
 
-	if *propsVMID != "" {
-		if err := startProperties(*natsURL, *natsCreds, *propsVMID, *propsDir, logger); err != nil {
-			logger.Fatalf("weft-microvm-agent: properties: %v", err)
+	if o.propsVMID != "" {
+		if err := startProperties(o.natsURL, o.natsCreds, o.propsVMID, o.propsDir, logger); err != nil {
+			return fmt.Errorf("properties: %w", err)
 		}
 	}
 
-	lis, err := net.Listen("tcp", *listenAddr)
+	lis, err := net.Listen("tcp", o.listenAddr)
 	if err != nil {
-		logger.Fatalf("weft-microvm-agent: listen %s: %v", *listenAddr, err)
+		return fmt.Errorf("listen %s: %w", o.listenAddr, err)
 	}
 
 	srv := grpc.NewServer()
 	introspectv1.RegisterIntrospectServer(srv, introspectsrv.New())
 
-	logger.Printf("weft-microvm-agent: Introspect serving on %s", *listenAddr)
+	logger.Printf("weft-microvm-agent: Introspect serving on %s", o.listenAddr)
 	if err := srv.Serve(lis); err != nil {
-		logger.Fatalf("weft-microvm-agent: serve: %v", err)
+		return fmt.Errorf("serve: %w", err)
 	}
+	return nil
 }
 
 // startMesh connects to the event bus and subscribes to this VM's mesh
@@ -183,7 +233,7 @@ func startMounts(url, creds, vmID string, reg *cubefs.Registry, logger *log.Logg
 // not diffed, so a missed message self-heals on the next publish (an
 // empty set is a valid "revoke all" state and is also applied).
 //
-// authStore may be nil if the embedded sshd is disabled ; the
+// authStore may be nil if the embedded sshd is disabled; the
 // authorized_keys writer still runs for backward compat.
 func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, authStore *agentsshd.AuthStore, logger *log.Logger) error {
 	var opts []nats.Option
@@ -194,10 +244,10 @@ func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, aut
 	if err != nil {
 		return err
 	}
-	// Compose the apply : both writes happen, both errors are
-	// surfaced. The authStore replace is cheap + memory-only ; the
-	// authorized_keys path may fail (read-only fs in tests, for
-	// instance) but that shouldn't block the authstore update.
+	// Compose the apply: both writes happen, both errors are surfaced. The
+	// authStore replace is cheap + memory-only; the authorized_keys path
+	// may fail (read-only fs in tests, for instance) but that shouldn't
+	// block the authstore update.
 	fileApply := sshKeysApplyer(authorizedKeysPath, uid, gid)
 	composed := func(ks agentsshkeys.KeySet) error {
 		if authStore != nil {
@@ -215,10 +265,10 @@ func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, aut
 	return nil
 }
 
-// startSSHD wires the embedded SSH server : loads (or generates) the
+// startSSHD wires the embedded SSH server: loads (or generates) the
 // persistent host key, builds the server with the shared AuthStore,
 // binds the listener, and serves in a goroutine. Failures during
-// listener binding are fatal (returned to caller) ; per-connection
+// listener binding are fatal (returned to caller); per-connection
 // errors are logged + dropped.
 func startSSHD(listen, hostKeyPath, shell string, authStore *agentsshd.AuthStore, logger *log.Logger) error {
 	signer, err := agentsshd.LoadOrCreateHostKey(hostKeyPath)
@@ -242,11 +292,11 @@ func startSSHD(listen, hostKeyPath, shell string, authStore *agentsshd.AuthStore
 	return nil
 }
 
-// startProperties connects to the event bus and subscribes to this
-// VM's property updates, mirroring the desired set onto a POSIX tree
-// (file-per-key, "/" → directory nesting). Any in-VM process reads
-// via `cat <propertiesDir>/<key>`. Replace-set semantics : an empty
-// publish clears the tree, missed messages self-heal on next publish.
+// startProperties connects to the event bus and subscribes to this VM's
+// property updates, mirroring the desired set onto a POSIX tree
+// (file-per-key, "/" → directory nesting). Any in-VM process reads via
+// `cat <propertiesDir>/<key>`. Replace-set semantics: an empty publish
+// clears the tree, missed messages self-heal on next publish.
 func startProperties(url, creds, vmID, propertiesDir string, logger *log.Logger) error {
 	var opts []nats.Option
 	if creds != "" {
@@ -265,16 +315,16 @@ func startProperties(url, creds, vmID, propertiesDir string, logger *log.Logger)
 	return nil
 }
 
-// watchAndRunBoot polls the property tree for weft.boot/* and runs
-// the boot.Runner once the request lands. Polling (not inotify) :
-// pkg/properties writes via tmp+rename which inotify would catch
-// cleanly, but the polling loop is ~10 lines + zero deps, and the
-// max latency is the poll interval. Idempotent : the Runner's
-// sentinel check short-circuits on subsequent reboots.
+// watchAndRunBoot polls the property tree for weft.boot/* and runs the
+// boot.Runner once the request lands. Polling (not inotify): pkg/properties
+// writes via tmp+rename which inotify would catch cleanly, but the polling
+// loop is ~10 lines + zero deps, and the max latency is the poll interval.
+// Idempotent: the Runner's sentinel check short-circuits on subsequent
+// reboots.
 //
-// Bails after maxWait without a request — the operator may have
-// stamped no boot config, in which case the sentinel is written
-// anyway so future polls return immediately.
+// Bails after maxWait without a request — the operator may have stamped no
+// boot config, in which case the sentinel is written anyway so future polls
+// return immediately.
 func watchAndRunBoot(propsDir string, runner *agentboot.Runner, logger *log.Logger) {
 	const (
 		pollEvery = 2 * time.Second
@@ -285,7 +335,7 @@ func watchAndRunBoot(propsDir string, runner *agentboot.Runner, logger *log.Logg
 
 	deadline := time.Now().Add(maxWait)
 	for {
-		// Sentinel already there ? Subsequent reboot ; nothing to do.
+		// Sentinel already there? Subsequent reboot; nothing to do.
 		if _, err := os.Stat(runner.SentinelPath); err == nil {
 			logger.Printf("weft-microvm-agent: boot sentinel present, skipping")
 			return
