@@ -101,7 +101,7 @@ func readOptionalFile(path string) (string, error) {
 // Cloner is the git-clone hook ; nil means "git pull not supported"
 // (the runner returns an error if SourceKind=="git" without a
 // Cloner). Tests inject a stub ; production wires the os/exec
-// helper in cmd/weft-vm-agent/boot_linux.go.
+// helper in cmd/weft-microvm-agent/boot_linux.go.
 type Runner struct {
 	WorkDir      string
 	SentinelPath string

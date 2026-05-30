@@ -1,7 +1,7 @@
-// weft-vm-agent runs inside an openweft micro-VM. It serves the read-only
+// weft-microvm-agent runs inside an openweft micro-VM. It serves the read-only
 // Introspect gRPC API (process table, …) to an operator CLI over the kernel
 // WireGuard overlay (wg0), and — when pointed at the event bus — subscribes
-// to mesh updates and re-applies its wg0 peer set whenever vzd publishes a
+// to mesh updates and re-applies its wg0 peer set whenever weft publishes a
 // new desired state.
 //
 // The gRPC server uses insecure credentials: transport confidentiality is
@@ -20,14 +20,14 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/openweft/weft-microvm-init/pkg/pod"
 	introspectv1 "github.com/openweft/weft-proto/introspectv1"
-	"github.com/openweft/weft-vm-agent/pkg/cubefs"
-	"github.com/openweft/weft-vm-agent/pkg/introspectsrv"
-	agentmesh "github.com/openweft/weft-vm-agent/pkg/mesh"
-	agentboot "github.com/openweft/weft-vm-agent/pkg/boot"
-	agentmounts "github.com/openweft/weft-vm-agent/pkg/mounts"
-	agentproperties "github.com/openweft/weft-vm-agent/pkg/properties"
-	agentsshd "github.com/openweft/weft-vm-agent/pkg/sshd"
-	agentsshkeys "github.com/openweft/weft-vm-agent/pkg/sshkeys"
+	"github.com/openweft/weft-microvm-agent/pkg/cubefs"
+	"github.com/openweft/weft-microvm-agent/pkg/introspectsrv"
+	agentmesh "github.com/openweft/weft-microvm-agent/pkg/mesh"
+	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
+	agentmounts "github.com/openweft/weft-microvm-agent/pkg/mounts"
+	agentproperties "github.com/openweft/weft-microvm-agent/pkg/properties"
+	agentsshd "github.com/openweft/weft-microvm-agent/pkg/sshd"
+	agentsshkeys "github.com/openweft/weft-microvm-agent/pkg/sshkeys"
 	"google.golang.org/grpc"
 )
 
@@ -65,19 +65,19 @@ func main() {
 
 	if *shareMounts != "" {
 		if err := applyBootMounts(*shareMounts, reg, logger); err != nil {
-			logger.Fatalf("weft-vm-agent: share mounts: %v", err)
+			logger.Fatalf("weft-microvm-agent: share mounts: %v", err)
 		}
 	}
 
 	if *meshVMID != "" {
 		if err := startMesh(*natsURL, *natsCreds, *meshVMID, logger); err != nil {
-			logger.Fatalf("weft-vm-agent: mesh: %v", err)
+			logger.Fatalf("weft-microvm-agent: mesh: %v", err)
 		}
 	}
 
 	if *mountsVMID != "" {
 		if err := startMounts(*natsURL, *natsCreds, *mountsVMID, reg, logger); err != nil {
-			logger.Fatalf("weft-vm-agent: mounts: %v", err)
+			logger.Fatalf("weft-microvm-agent: mounts: %v", err)
 		}
 	}
 
@@ -91,13 +91,13 @@ func main() {
 	if *sshKeysVMID != "" {
 		if err := startSSHKeys(*natsURL, *natsCreds, *sshKeysVMID,
 			*sshKeysAuthorizedKeys, *sshKeysUID, *sshKeysGID, authStore, logger); err != nil {
-			logger.Fatalf("weft-vm-agent: sshkeys: %v", err)
+			logger.Fatalf("weft-microvm-agent: sshkeys: %v", err)
 		}
 	}
 
 	if *sshdListen != "" {
 		if err := startSSHD(*sshdListen, *sshdHostKey, *sshdShell, authStore, logger); err != nil {
-			logger.Fatalf("weft-vm-agent: sshd: %v", err)
+			logger.Fatalf("weft-microvm-agent: sshd: %v", err)
 		}
 	}
 
@@ -113,21 +113,21 @@ func main() {
 
 	if *propsVMID != "" {
 		if err := startProperties(*natsURL, *natsCreds, *propsVMID, *propsDir, logger); err != nil {
-			logger.Fatalf("weft-vm-agent: properties: %v", err)
+			logger.Fatalf("weft-microvm-agent: properties: %v", err)
 		}
 	}
 
 	lis, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
-		logger.Fatalf("weft-vm-agent: listen %s: %v", *listenAddr, err)
+		logger.Fatalf("weft-microvm-agent: listen %s: %v", *listenAddr, err)
 	}
 
 	srv := grpc.NewServer()
 	introspectv1.RegisterIntrospectServer(srv, introspectsrv.New())
 
-	logger.Printf("weft-vm-agent: Introspect serving on %s", *listenAddr)
+	logger.Printf("weft-microvm-agent: Introspect serving on %s", *listenAddr)
 	if err := srv.Serve(lis); err != nil {
-		logger.Fatalf("weft-vm-agent: serve: %v", err)
+		logger.Fatalf("weft-microvm-agent: serve: %v", err)
 	}
 }
 
@@ -147,7 +147,7 @@ func startMesh(url, creds, vmID string, logger *log.Logger) error {
 		nc.Close()
 		return err
 	}
-	logger.Printf("weft-vm-agent: mesh subscribed on %s", agentmesh.Subject(vmID))
+	logger.Printf("weft-microvm-agent: mesh subscribed on %s", agentmesh.Subject(vmID))
 	return nil
 }
 
@@ -169,7 +169,7 @@ func startMounts(url, creds, vmID string, reg *cubefs.Registry, logger *log.Logg
 		nc.Close()
 		return err
 	}
-	logger.Printf("weft-vm-agent: mounts subscribed on %s", agentmounts.Subject(vmID))
+	logger.Printf("weft-microvm-agent: mounts subscribed on %s", agentmounts.Subject(vmID))
 	return nil
 }
 
@@ -202,7 +202,7 @@ func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, aut
 	composed := func(ks agentsshkeys.KeySet) error {
 		if authStore != nil {
 			accepted, rejected := authStore.Replace(ks)
-			logger.Printf("weft-vm-agent: sshkeys authstore : %d accepted, %d rejected", accepted, rejected)
+			logger.Printf("weft-microvm-agent: sshkeys authstore : %d accepted, %d rejected", accepted, rejected)
 		}
 		return fileApply(ks)
 	}
@@ -211,7 +211,7 @@ func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, aut
 		nc.Close()
 		return err
 	}
-	logger.Printf("weft-vm-agent: sshkeys subscribed on %s -> authorized_keys=%s + AuthStore", agentsshkeys.Subject(vmID), authorizedKeysPath)
+	logger.Printf("weft-microvm-agent: sshkeys subscribed on %s -> authorized_keys=%s + AuthStore", agentsshkeys.Subject(vmID), authorizedKeysPath)
 	return nil
 }
 
@@ -233,10 +233,10 @@ func startSSHD(listen, hostKeyPath, shell string, authStore *agentsshd.AuthStore
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", listen, err)
 	}
-	logger.Printf("weft-vm-agent: sshd on %s (host key %s)", ln.Addr(), hostKeyPath)
+	logger.Printf("weft-microvm-agent: sshd on %s (host key %s)", ln.Addr(), hostKeyPath)
 	go func() {
 		if err := srv.Serve(ln); err != nil {
-			logger.Printf("weft-vm-agent: sshd serve: %v", err)
+			logger.Printf("weft-microvm-agent: sshd serve: %v", err)
 		}
 	}()
 	return nil
@@ -261,7 +261,7 @@ func startProperties(url, creds, vmID, propertiesDir string, logger *log.Logger)
 		nc.Close()
 		return err
 	}
-	logger.Printf("weft-vm-agent: properties subscribed on %s -> %s", agentproperties.Subject(vmID), propertiesDir)
+	logger.Printf("weft-microvm-agent: properties subscribed on %s -> %s", agentproperties.Subject(vmID), propertiesDir)
 	return nil
 }
 
@@ -287,13 +287,13 @@ func watchAndRunBoot(propsDir string, runner *agentboot.Runner, logger *log.Logg
 	for {
 		// Sentinel already there ? Subsequent reboot ; nothing to do.
 		if _, err := os.Stat(runner.SentinelPath); err == nil {
-			logger.Printf("weft-vm-agent: boot sentinel present, skipping")
+			logger.Printf("weft-microvm-agent: boot sentinel present, skipping")
 			return
 		}
 
 		cfg, err := agentboot.ReadFromPropertiesDir(propsDir)
 		if err != nil {
-			logger.Printf("weft-vm-agent: boot read %s: %v", propsDir, err)
+			logger.Printf("weft-microvm-agent: boot read %s: %v", propsDir, err)
 			time.Sleep(pollEvery)
 			continue
 		}
@@ -302,18 +302,18 @@ func watchAndRunBoot(propsDir string, runner *agentboot.Runner, logger *log.Logg
 		// all-empty config too early would stamp the sentinel before
 		// the host had a chance to publish.
 		if !cfg.IsEmpty() {
-			logger.Printf("weft-vm-agent: boot config seen ; provisioning (kind=%q url=%q script-bytes=%d)",
+			logger.Printf("weft-microvm-agent: boot config seen ; provisioning (kind=%q url=%q script-bytes=%d)",
 				cfg.SourceKind, cfg.SourceURL, len(cfg.Script))
 			if err := runner.Run(ctx, cfg); err != nil {
-				logger.Printf("weft-vm-agent: boot run: %v", err)
+				logger.Printf("weft-microvm-agent: boot run: %v", err)
 				return
 			}
-			logger.Printf("weft-vm-agent: boot run ok ; sentinel written")
+			logger.Printf("weft-microvm-agent: boot run ok ; sentinel written")
 			return
 		}
 
 		if time.Now().After(deadline) {
-			logger.Printf("weft-vm-agent: boot : no config after %s, stamping sentinel + exiting watcher", maxWait)
+			logger.Printf("weft-microvm-agent: boot : no config after %s, stamping sentinel + exiting watcher", maxWait)
 			_ = runner.Run(ctx, agentboot.Config{}) // empty Run stamps the sentinel
 			return
 		}
@@ -333,7 +333,7 @@ func applyBootMounts(path string, reg *cubefs.Registry, logger *log.Logger) erro
 		if err := reg.Apply(m); err != nil {
 			return fmt.Errorf("apply %q: %w", m.ID, err)
 		}
-		logger.Printf("weft-vm-agent: mounted %s at %s", m.ID, m.MountPoint)
+		logger.Printf("weft-microvm-agent: mounted %s at %s", m.ID, m.MountPoint)
 	}
 	return nil
 }

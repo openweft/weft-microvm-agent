@@ -2,7 +2,7 @@
 
 package main
 
-import "github.com/openweft/weft-vm-agent/pkg/boot"
+import "github.com/openweft/weft-microvm-agent/pkg/boot"
 
 func bootRunner(workDir, sentinelPath string, logOut interface{ Write([]byte) (int, error) }) *boot.Runner {
 	// macOS dev build : leave Cloner nil. Runner returns a clear

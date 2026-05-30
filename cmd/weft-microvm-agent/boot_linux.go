@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"os/exec"
 
-	"github.com/openweft/weft-vm-agent/pkg/boot"
+	"github.com/openweft/weft-microvm-agent/pkg/boot"
 )
 
 // gitClone is the boot.Runner.Cloner production wiring. Honours ctx

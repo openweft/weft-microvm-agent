@@ -1,6 +1,6 @@
 //go:build !linux
 
-// Non-Linux stub : weft-vm-agent runs inside Linux microVMs in
+// Non-Linux stub : weft-microvm-agent runs inside Linux microVMs in
 // production. The PTY plumbing in server.go (creack/pty + syscall
 // SysProcAttr.Setsid/Setctty) is Linux-only ; on macOS the package
 // compiles to this stub so `go build ./...` works during dev.
@@ -27,5 +27,5 @@ func NewServer(store *AuthStore, hostKey ssh.Signer, shell string, logger *log.L
 }
 
 func (*Server) Serve(net.Listener) error {
-	return errors.New("sshd is Linux-only ; weft-vm-agent runs inside a Linux microVM")
+	return errors.New("sshd is Linux-only ; weft-microvm-agent runs inside a Linux microVM")
 }

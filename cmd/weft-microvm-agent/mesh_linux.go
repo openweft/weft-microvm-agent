@@ -4,7 +4,7 @@ package main
 
 import (
 	netmesh "github.com/openweft/weft-microvm-init/pkg/network"
-	agentmesh "github.com/openweft/weft-vm-agent/pkg/mesh"
+	agentmesh "github.com/openweft/weft-microvm-agent/pkg/mesh"
 )
 
 // meshApply is the real kernel applier on Linux: a published mesh update is

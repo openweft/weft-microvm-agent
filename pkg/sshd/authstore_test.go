@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"github.com/openweft/weft-vm-agent/pkg/sshkeys"
+	"github.com/openweft/weft-microvm-agent/pkg/sshkeys"
 	"golang.org/x/crypto/ssh"
 )
 
