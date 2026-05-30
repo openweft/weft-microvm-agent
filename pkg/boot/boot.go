@@ -17,9 +17,10 @@
 //
 // Script execution uses mvdan.cc/sh/v3 (POSIX sh in Go) so the
 // payload doesn't need to ship /bin/sh in its image — works for
-// scratch / distroless / alpine alike. git clone shells out to
-// /usr/bin/git when present (the ramdisk includes it) ; OCI pull
-// is documented as a follow-on (oras-go integration).
+// scratch / distroless / alpine alike. Git clone uses go-git
+// (pure-Go, no /usr/bin/git in the ramdisk) ; OCI pull uses
+// oras-go (pure-Go, anonymous registry pulls). Both are wired via
+// the Cloner / Puller hooks on Runner so tests can stub them.
 package boot
 
 import (
@@ -100,13 +101,17 @@ func readOptionalFile(path string) (string, error) {
 //
 // Cloner is the git-clone hook ; nil means "git pull not supported"
 // (the runner returns an error if SourceKind=="git" without a
-// Cloner). Tests inject a stub ; production wires the os/exec
-// helper in cmd/weft-microvm-agent/boot_linux.go.
+// Cloner). Tests inject a stub ; production wires a go-git helper
+// in cmd/weft-microvm-agent/boot.go.
+//
+// Puller is the symmetric OCI hook ; same nil-means-unsupported
+// rule. Production uses oras-go for anonymous registry pulls.
 type Runner struct {
 	WorkDir      string
 	SentinelPath string
 	LogOut       io.Writer
 	Cloner       func(ctx context.Context, url, ref, dst string) error
+	Puller       func(ctx context.Context, url, ref, dst string) error
 }
 
 // Run executes one provisioning pass. Idempotent : if SentinelPath
@@ -117,9 +122,8 @@ type Runner struct {
 // Order of effects :
 //
 //  1. sentinel check  (early return when already provisioned)
-//  2. pull            (git clone into <WorkDir>/payload ; skipped
-//                     when SourceKind == "" or SourceKind == "oci"
-//                     since OCI isn't wired yet)
+//  2. pull            (git clone or oras pull into <WorkDir>/payload ;
+//                     skipped when SourceKind is empty)
 //  3. script          (mvdan.cc/sh/v3 in payload CWD if it exists,
 //                     else WorkDir)
 //  4. sentinel write  (only when everything above succeeded)
@@ -159,9 +163,13 @@ func (r *Runner) Run(ctx context.Context, cfg Config) (err error) {
 			return fmt.Errorf("git clone: %w", err)
 		}
 	case "oci":
-		// Documented gap — see package doc. Returning a clear error
-		// is better than silently dropping the source.
-		return errors.New("oci provisioning not yet wired in this build (use git for now)")
+		if r.Puller == nil {
+			return errors.New("oci pull requested but no Puller wired")
+		}
+		fmt.Fprintf(r.LogOut, "weft-boot: oci pull %s @ %s -> %s\n", cfg.SourceURL, cfg.SourceRef, payloadDir)
+		if err := r.Puller(ctx, cfg.SourceURL, cfg.SourceRef, payloadDir); err != nil {
+			return fmt.Errorf("oci pull: %w", err)
+		}
 	default:
 		return fmt.Errorf("unknown source kind %q", cfg.SourceKind)
 	}
