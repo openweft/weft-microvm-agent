@@ -100,15 +100,51 @@ func TestRunner_GitWithoutClonerErrors(t *testing.T) {
 	}
 }
 
-func TestRunner_OCIIsExplicitlyUnwired(t *testing.T) {
+func TestRunner_OCIWithoutPullerErrors(t *testing.T) {
 	dir := t.TempDir()
 	r := &Runner{
 		WorkDir:      filepath.Join(dir, "work"),
 		SentinelPath: filepath.Join(dir, "p"),
 	}
 	err := r.Run(context.Background(), Config{SourceKind: "oci", SourceURL: "x"})
-	if err == nil || !strings.Contains(err.Error(), "oci provisioning not yet wired") {
-		t.Errorf("expected explicit OCI-not-wired error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no Puller wired") {
+		t.Errorf("expected explicit OCI-no-Puller error, got %v", err)
+	}
+}
+
+func TestRunner_PullerErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	want := "registry down"
+	r := &Runner{
+		WorkDir:      filepath.Join(dir, "work"),
+		SentinelPath: filepath.Join(dir, "p"),
+		Puller: func(ctx context.Context, _, _, _ string) error {
+			return errors.New(want)
+		},
+	}
+	err := r.Run(context.Background(), Config{SourceKind: "oci", SourceURL: "x"})
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("puller error not wrapped : %v", err)
+	}
+}
+
+func TestRunner_PullerCalledWithURLAndRef(t *testing.T) {
+	dir := t.TempDir()
+	var gotURL, gotRef string
+	r := &Runner{
+		WorkDir:      filepath.Join(dir, "work"),
+		SentinelPath: filepath.Join(dir, "p"),
+		Puller: func(ctx context.Context, u, ref, _ string) error {
+			gotURL, gotRef = u, ref
+			return nil
+		},
+	}
+	cfg := Config{SourceKind: "oci", SourceURL: "ghcr.io/openweft/payload", SourceRef: "v1.2.3"}
+	if err := r.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if gotURL != cfg.SourceURL || gotRef != cfg.SourceRef {
+		t.Errorf("Puller called with (url=%q,ref=%q) ; want (%q,%q)", gotURL, gotRef, cfg.SourceURL, cfg.SourceRef)
 	}
 }
 
