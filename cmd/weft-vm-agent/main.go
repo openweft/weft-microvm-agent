@@ -23,6 +23,7 @@ import (
 	agentmesh "github.com/openweft/weft-vm-agent/pkg/mesh"
 	agentmounts "github.com/openweft/weft-vm-agent/pkg/mounts"
 	agentproperties "github.com/openweft/weft-vm-agent/pkg/properties"
+	agentsshd "github.com/openweft/weft-vm-agent/pkg/sshd"
 	agentsshkeys "github.com/openweft/weft-vm-agent/pkg/sshkeys"
 	"google.golang.org/grpc"
 )
@@ -37,6 +38,9 @@ func main() {
 	sshKeysGID := flag.Int("sshkeys-gid", 0, "gid to chown authorized_keys to (-1 to skip)")
 	propsVMID := flag.String("properties-vm-id", "", "this VM's id; when set, subscribe to dynamic property updates on the event bus")
 	propsDir := flag.String("properties-dir", "/run/weft/properties", "directory under which guest-readable properties are mirrored (file-per-key, nested on '/')")
+	sshdListen := flag.String("sshd-listen", "", "address for the embedded SSH server (e.g. \"0.0.0.0:2222\" on the wg0 IP) ; empty disables it")
+	sshdHostKey := flag.String("sshd-host-key", "/var/lib/weft/sshd_host_ed25519", "path to the persistent ed25519 host key for the embedded sshd (generated on first boot)")
+	sshdShell := flag.String("sshd-shell", "/bin/sh", "shell binary execed on accepted sessions ; runs in the VM's PID-1 namespace, not the container's")
 	shareMounts := flag.String("share-mounts", "", "path to a JSON array of boot-time share mounts to apply at startup")
 	natsURL := flag.String("nats-url", nats.DefaultURL, "event-bus URL for mesh/mount updates")
 	natsCreds := flag.String("nats-creds", "", "path to NATS credentials (the per-project creds staged into the VM)")
@@ -71,10 +75,23 @@ func main() {
 		}
 	}
 
+	// Shared AuthStore : the sshkeys subscriber writes into it on
+	// every NATS push ; the embedded sshd reads from it on every
+	// connection. One source of truth for "which keys can SSH in
+	// right now". Created unconditionally — cheap, harmless when
+	// neither subscriber nor sshd are started.
+	authStore := agentsshd.NewAuthStore()
+
 	if *sshKeysVMID != "" {
 		if err := startSSHKeys(*natsURL, *natsCreds, *sshKeysVMID,
-			*sshKeysAuthorizedKeys, *sshKeysUID, *sshKeysGID, logger); err != nil {
+			*sshKeysAuthorizedKeys, *sshKeysUID, *sshKeysGID, authStore, logger); err != nil {
 			logger.Fatalf("weft-vm-agent: sshkeys: %v", err)
+		}
+	}
+
+	if *sshdListen != "" {
+		if err := startSSHD(*sshdListen, *sshdHostKey, *sshdShell, authStore, logger); err != nil {
+			logger.Fatalf("weft-vm-agent: sshd: %v", err)
 		}
 	}
 
@@ -141,12 +158,18 @@ func startMounts(url, creds, vmID string, reg *cubefs.Registry, logger *log.Logg
 }
 
 // startSSHKeys connects to the event bus and subscribes to this VM's
-// SSH-keys updates, rewriting the target user's authorized_keys
-// atomically on each push. Same Subscriber+ApplyFunc pattern as
-// mesh / mounts — state is whole, not diffed, so a missed message
-// self-heals on the next publish (an empty set is a valid "revoke
-// all" state and is also applied).
-func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, logger *log.Logger) error {
+// SSH-keys updates. Two effects on each push :
+//  1. Rewrite the target user's authorized_keys atomically (keeps a
+//     workload-side sshd, if any, functional).
+//  2. Replace the AuthStore consulted by the embedded sshd in pkg/sshd.
+//
+// Same Subscriber+ApplyFunc pattern as mesh / mounts — state is whole,
+// not diffed, so a missed message self-heals on the next publish (an
+// empty set is a valid "revoke all" state and is also applied).
+//
+// authStore may be nil if the embedded sshd is disabled ; the
+// authorized_keys writer still runs for backward compat.
+func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, authStore *agentsshd.AuthStore, logger *log.Logger) error {
 	var opts []nats.Option
 	if creds != "" {
 		opts = append(opts, nats.UserCredentials(creds))
@@ -155,12 +178,51 @@ func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, log
 	if err != nil {
 		return err
 	}
-	sub := agentsshkeys.NewSubscriber(nc, vmID, sshKeysApplyer(authorizedKeysPath, uid, gid), logger)
+	// Compose the apply : both writes happen, both errors are
+	// surfaced. The authStore replace is cheap + memory-only ; the
+	// authorized_keys path may fail (read-only fs in tests, for
+	// instance) but that shouldn't block the authstore update.
+	fileApply := sshKeysApplyer(authorizedKeysPath, uid, gid)
+	composed := func(ks agentsshkeys.KeySet) error {
+		if authStore != nil {
+			accepted, rejected := authStore.Replace(ks)
+			logger.Printf("weft-vm-agent: sshkeys authstore : %d accepted, %d rejected", accepted, rejected)
+		}
+		return fileApply(ks)
+	}
+	sub := agentsshkeys.NewSubscriber(nc, vmID, composed, logger)
 	if _, err := sub.Start(); err != nil {
 		nc.Close()
 		return err
 	}
-	logger.Printf("weft-vm-agent: sshkeys subscribed on %s -> %s", agentsshkeys.Subject(vmID), authorizedKeysPath)
+	logger.Printf("weft-vm-agent: sshkeys subscribed on %s -> authorized_keys=%s + AuthStore", agentsshkeys.Subject(vmID), authorizedKeysPath)
+	return nil
+}
+
+// startSSHD wires the embedded SSH server : loads (or generates) the
+// persistent host key, builds the server with the shared AuthStore,
+// binds the listener, and serves in a goroutine. Failures during
+// listener binding are fatal (returned to caller) ; per-connection
+// errors are logged + dropped.
+func startSSHD(listen, hostKeyPath, shell string, authStore *agentsshd.AuthStore, logger *log.Logger) error {
+	signer, err := agentsshd.LoadOrCreateHostKey(hostKeyPath)
+	if err != nil {
+		return fmt.Errorf("host key %s: %w", hostKeyPath, err)
+	}
+	srv, err := agentsshd.NewServer(authStore, signer, shell, logger)
+	if err != nil {
+		return err
+	}
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", listen, err)
+	}
+	logger.Printf("weft-vm-agent: sshd on %s (host key %s)", ln.Addr(), hostKeyPath)
+	go func() {
+		if err := srv.Serve(ln); err != nil {
+			logger.Printf("weft-vm-agent: sshd serve: %v", err)
+		}
+	}()
 	return nil
 }
 
