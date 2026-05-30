@@ -22,6 +22,7 @@ import (
 	"github.com/openweft/weft-vm-agent/pkg/introspectsrv"
 	agentmesh "github.com/openweft/weft-vm-agent/pkg/mesh"
 	agentmounts "github.com/openweft/weft-vm-agent/pkg/mounts"
+	agentproperties "github.com/openweft/weft-vm-agent/pkg/properties"
 	agentsshkeys "github.com/openweft/weft-vm-agent/pkg/sshkeys"
 	"google.golang.org/grpc"
 )
@@ -34,6 +35,8 @@ func main() {
 	sshKeysAuthorizedKeys := flag.String("sshkeys-authorized-keys", "/root/.ssh/authorized_keys", "path to the authorized_keys file the sshkeys subscriber rewrites on each update")
 	sshKeysUID := flag.Int("sshkeys-uid", 0, "uid to chown authorized_keys to (-1 to skip)")
 	sshKeysGID := flag.Int("sshkeys-gid", 0, "gid to chown authorized_keys to (-1 to skip)")
+	propsVMID := flag.String("properties-vm-id", "", "this VM's id; when set, subscribe to dynamic property updates on the event bus")
+	propsDir := flag.String("properties-dir", "/run/weft/properties", "directory under which guest-readable properties are mirrored (file-per-key, nested on '/')")
 	shareMounts := flag.String("share-mounts", "", "path to a JSON array of boot-time share mounts to apply at startup")
 	natsURL := flag.String("nats-url", nats.DefaultURL, "event-bus URL for mesh/mount updates")
 	natsCreds := flag.String("nats-creds", "", "path to NATS credentials (the per-project creds staged into the VM)")
@@ -72,6 +75,12 @@ func main() {
 		if err := startSSHKeys(*natsURL, *natsCreds, *sshKeysVMID,
 			*sshKeysAuthorizedKeys, *sshKeysUID, *sshKeysGID, logger); err != nil {
 			logger.Fatalf("weft-vm-agent: sshkeys: %v", err)
+		}
+	}
+
+	if *propsVMID != "" {
+		if err := startProperties(*natsURL, *natsCreds, *propsVMID, *propsDir, logger); err != nil {
+			logger.Fatalf("weft-vm-agent: properties: %v", err)
 		}
 	}
 
@@ -152,6 +161,29 @@ func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, log
 		return err
 	}
 	logger.Printf("weft-vm-agent: sshkeys subscribed on %s -> %s", agentsshkeys.Subject(vmID), authorizedKeysPath)
+	return nil
+}
+
+// startProperties connects to the event bus and subscribes to this
+// VM's property updates, mirroring the desired set onto a POSIX tree
+// (file-per-key, "/" → directory nesting). Any in-VM process reads
+// via `cat <propertiesDir>/<key>`. Replace-set semantics : an empty
+// publish clears the tree, missed messages self-heal on next publish.
+func startProperties(url, creds, vmID, propertiesDir string, logger *log.Logger) error {
+	var opts []nats.Option
+	if creds != "" {
+		opts = append(opts, nats.UserCredentials(creds))
+	}
+	nc, err := nats.Connect(url, opts...)
+	if err != nil {
+		return err
+	}
+	sub := agentproperties.NewSubscriber(nc, vmID, propertiesApplyer(propertiesDir), logger)
+	if _, err := sub.Start(); err != nil {
+		nc.Close()
+		return err
+	}
+	logger.Printf("weft-vm-agent: properties subscribed on %s -> %s", agentproperties.Subject(vmID), propertiesDir)
 	return nil
 }
 
