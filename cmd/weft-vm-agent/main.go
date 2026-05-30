@@ -9,11 +9,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/openweft/weft-microvm-init/pkg/pod"
@@ -21,6 +23,7 @@ import (
 	"github.com/openweft/weft-vm-agent/pkg/cubefs"
 	"github.com/openweft/weft-vm-agent/pkg/introspectsrv"
 	agentmesh "github.com/openweft/weft-vm-agent/pkg/mesh"
+	agentboot "github.com/openweft/weft-vm-agent/pkg/boot"
 	agentmounts "github.com/openweft/weft-vm-agent/pkg/mounts"
 	agentproperties "github.com/openweft/weft-vm-agent/pkg/properties"
 	agentsshd "github.com/openweft/weft-vm-agent/pkg/sshd"
@@ -41,6 +44,9 @@ func main() {
 	sshdListen := flag.String("sshd-listen", "", "address for the embedded SSH server (e.g. \"0.0.0.0:2222\" on the wg0 IP) ; empty disables it")
 	sshdHostKey := flag.String("sshd-host-key", "/var/lib/weft/sshd_host_ed25519", "path to the persistent ed25519 host key for the embedded sshd (generated on first boot)")
 	sshdShell := flag.String("sshd-shell", "/bin/sh", "shell binary execed on accepted sessions ; runs in the VM's PID-1 namespace, not the container's")
+	bootWatch := flag.Bool("boot-watch", false, "watch the property tree for weft.boot/* and run first-boot provisioning once on appearance")
+	bootWorkDir := flag.String("boot-workdir", "/var/lib/weft/boot", "parent directory for the boot payload ; <workdir>/payload is the git clone target + script CWD")
+	bootSentinel := flag.String("boot-sentinel", "/var/lib/weft/provisioned", "sentinel file ; once present, boot provisioning is skipped (idempotent across reboots)")
 	shareMounts := flag.String("share-mounts", "", "path to a JSON array of boot-time share mounts to apply at startup")
 	natsURL := flag.String("nats-url", nats.DefaultURL, "event-bus URL for mesh/mount updates")
 	natsCreds := flag.String("nats-creds", "", "path to NATS credentials (the per-project creds staged into the VM)")
@@ -93,6 +99,16 @@ func main() {
 		if err := startSSHD(*sshdListen, *sshdHostKey, *sshdShell, authStore, logger); err != nil {
 			logger.Fatalf("weft-vm-agent: sshd: %v", err)
 		}
+	}
+
+	// First-boot provisioning : watch the property tree for
+	// weft.boot/* to appear, then run the configured payload + script
+	// exactly once (sentinel-guarded). Disabled when --boot-watch
+	// isn't set ; also a fast no-op when the sentinel already exists
+	// (i.e. on subsequent reboots).
+	if *bootWatch {
+		runner := bootRunner(*bootWorkDir, *bootSentinel, logger.Writer())
+		go watchAndRunBoot(*propsDir, runner, logger)
 	}
 
 	if *propsVMID != "" {
@@ -247,6 +263,62 @@ func startProperties(url, creds, vmID, propertiesDir string, logger *log.Logger)
 	}
 	logger.Printf("weft-vm-agent: properties subscribed on %s -> %s", agentproperties.Subject(vmID), propertiesDir)
 	return nil
+}
+
+// watchAndRunBoot polls the property tree for weft.boot/* and runs
+// the boot.Runner once the request lands. Polling (not inotify) :
+// pkg/properties writes via tmp+rename which inotify would catch
+// cleanly, but the polling loop is ~10 lines + zero deps, and the
+// max latency is the poll interval. Idempotent : the Runner's
+// sentinel check short-circuits on subsequent reboots.
+//
+// Bails after maxWait without a request — the operator may have
+// stamped no boot config, in which case the sentinel is written
+// anyway so future polls return immediately.
+func watchAndRunBoot(propsDir string, runner *agentboot.Runner, logger *log.Logger) {
+	const (
+		pollEvery = 2 * time.Second
+		maxWait   = 5 * time.Minute
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), maxWait+30*time.Second)
+	defer cancel()
+
+	deadline := time.Now().Add(maxWait)
+	for {
+		// Sentinel already there ? Subsequent reboot ; nothing to do.
+		if _, err := os.Stat(runner.SentinelPath); err == nil {
+			logger.Printf("weft-vm-agent: boot sentinel present, skipping")
+			return
+		}
+
+		cfg, err := agentboot.ReadFromPropertiesDir(propsDir)
+		if err != nil {
+			logger.Printf("weft-vm-agent: boot read %s: %v", propsDir, err)
+			time.Sleep(pollEvery)
+			continue
+		}
+
+		// Wait until SOMETHING is set OR we time out. Running with an
+		// all-empty config too early would stamp the sentinel before
+		// the host had a chance to publish.
+		if !cfg.IsEmpty() {
+			logger.Printf("weft-vm-agent: boot config seen ; provisioning (kind=%q url=%q script-bytes=%d)",
+				cfg.SourceKind, cfg.SourceURL, len(cfg.Script))
+			if err := runner.Run(ctx, cfg); err != nil {
+				logger.Printf("weft-vm-agent: boot run: %v", err)
+				return
+			}
+			logger.Printf("weft-vm-agent: boot run ok ; sentinel written")
+			return
+		}
+
+		if time.Now().After(deadline) {
+			logger.Printf("weft-vm-agent: boot : no config after %s, stamping sentinel + exiting watcher", maxWait)
+			_ = runner.Run(ctx, agentboot.Config{}) // empty Run stamps the sentinel
+			return
+		}
+		time.Sleep(pollEvery)
+	}
 }
 
 // applyBootMounts applies the static share mounts listed in a JSON file at
