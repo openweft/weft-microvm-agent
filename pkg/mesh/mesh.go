@@ -1,4 +1,4 @@
-// Package mesh is the VM side of dynamic WireGuard mesh updates. vzd
+// Package mesh is the VM side of dynamic WireGuard mesh updates. weft
 // publishes a VM's full desired wg0 config on the event bus whenever the
 // mesh membership changes; the VM subscribes and re-applies it (replace-set,
 // idempotent). State is pushed whole rather than diffed, so a missed message
@@ -14,7 +14,7 @@ import (
 	"github.com/openweft/weft-microvm-init/pkg/pod"
 )
 
-// Subject is the per-VM event-bus subject vzd publishes mesh updates on.
+// Subject is the per-VM event-bus subject weft publishes mesh updates on.
 func Subject(vmID string) string { return "weft.mesh." + vmID }
 
 // ApplyFunc applies a desired WireGuard config to the kernel. The real

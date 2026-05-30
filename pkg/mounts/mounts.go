@@ -19,7 +19,7 @@ import (
 
 // Subject is the per-VM event-bus subject share mount updates arrive on.
 // A class-wide publish is the control plane's job: it resolves the group
-// to its VMs and publishes to each VM's subject (mirrors how vzd fans out
+// to its VMs and publishes to each VM's subject (mirrors how weft fans out
 // mesh updates), so the guest only ever trusts its own subject.
 func Subject(vmID string) string { return "weft.mounts." + vmID }
 

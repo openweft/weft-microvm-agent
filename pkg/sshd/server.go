@@ -3,7 +3,7 @@
 // server.go — minimal interactive-shell SSH server. Accepts session
 // channels only ; refuses port-forwarding, X11, agent-forwarding,
 // SFTP. The use case is ops shell into the VM, nothing fancier.
-// Operators who need SFTP push files via `weft vm push` or NCL
+// Operators who need SFTP push files via `weft vm push` or WEFT_MICROVM
 // share mounts ; both already exist.
 //
 // Auth : public-key only, against the AuthStore (kept fresh by the
@@ -89,7 +89,7 @@ func (s *Server) config() *ssh.ServerConfig {
 				},
 			}, nil
 		},
-		ServerVersion: "SSH-2.0-weft-vm-agent",
+		ServerVersion: "SSH-2.0-weft-microvm-agent",
 	}
 	cfg.AddHostKey(s.HostKey)
 	return cfg
@@ -136,7 +136,7 @@ func (s *Server) handleConn(nc net.Conn) {
 
 	for newCh := range chans {
 		if newCh.ChannelType() != "session" {
-			_ = newCh.Reject(ssh.UnknownChannelType, "weft-vm-agent only supports session channels")
+			_ = newCh.Reject(ssh.UnknownChannelType, "weft-microvm-agent only supports session channels")
 			continue
 		}
 		ch, chReqs, err := newCh.Accept()

@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/openweft/weft-vm-agent/pkg/sshkeys"
+	"github.com/openweft/weft-microvm-agent/pkg/sshkeys"
 )
 
 // sshKeysApplyer returns an ApplyFunc that writes the keys to the
@@ -37,7 +37,7 @@ func sshKeysApplyer(authorizedKeysPath string, uid, gid int) sshkeys.ApplyFunc {
 		}
 
 		var buf strings.Builder
-		buf.WriteString("# Managed by weft-vm-agent. Edits are overwritten on next push.\n")
+		buf.WriteString("# Managed by weft-microvm-agent. Edits are overwritten on next push.\n")
 		for _, k := range ks.Keys {
 			buf.WriteString(k.PublicKey)
 			buf.WriteByte('\n')

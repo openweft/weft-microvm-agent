@@ -7,7 +7,7 @@ import (
 	"context"
 
 	introspectv1 "github.com/openweft/weft-proto/introspectv1"
-	"github.com/openweft/weft-vm-agent/pkg/procps"
+	"github.com/openweft/weft-microvm-agent/pkg/procps"
 )
 
 // Server implements introspectv1.IntrospectServer.

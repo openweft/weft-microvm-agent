@@ -1,5 +1,5 @@
 // Package sshd is the embedded SSH server that runs inside the
-// microVM (in the ramdisk's weft-vm-agent process). Replaces the
+// microVM (in the ramdisk's weft-microvm-agent process). Replaces the
 // "depend on whatever sshd ships in the container image" approach :
 // Docker / scratch / distroless images don't carry sshd, so ops
 // access via SSH would otherwise require the workload owner to
@@ -14,14 +14,14 @@
 // in-memory store.
 //
 // Shell exec'd is the VM's own shell (PID-1 namespace), not the
-// container's. Clean separation : SSH = the VM's runtime, `ncl
+// container's. Clean separation : SSH = the VM's runtime, `weft-microvm
 // exec <container> sh` = the workload. Operators get both axes.
 package sshd
 
 import (
 	"sync"
 
-	"github.com/openweft/weft-vm-agent/pkg/sshkeys"
+	"github.com/openweft/weft-microvm-agent/pkg/sshkeys"
 	"golang.org/x/crypto/ssh"
 )
 

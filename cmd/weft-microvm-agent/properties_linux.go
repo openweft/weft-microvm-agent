@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/openweft/weft-vm-agent/pkg/properties"
+	"github.com/openweft/weft-microvm-agent/pkg/properties"
 )
 
 // propertiesApplyer returns an ApplyFunc that syncs the property

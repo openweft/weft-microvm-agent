@@ -65,7 +65,7 @@ func (s KeySet) Validate() error {
 
 // ApplyFunc applies the desired key set to the guest. The real
 // implementation rewrites the target user's authorized_keys
-// atomically (see cmd/weft-vm-agent/sshkeys_linux.go). Tests inject
+// atomically (see cmd/weft-microvm-agent/sshkeys_linux.go). Tests inject
 // a stub.
 type ApplyFunc func(KeySet) error
 
