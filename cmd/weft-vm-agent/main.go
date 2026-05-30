@@ -22,6 +22,7 @@ import (
 	"github.com/openweft/weft-vm-agent/pkg/introspectsrv"
 	agentmesh "github.com/openweft/weft-vm-agent/pkg/mesh"
 	agentmounts "github.com/openweft/weft-vm-agent/pkg/mounts"
+	agentsshkeys "github.com/openweft/weft-vm-agent/pkg/sshkeys"
 	"google.golang.org/grpc"
 )
 
@@ -29,6 +30,10 @@ func main() {
 	listenAddr := flag.String("listen", "0.0.0.0:51999", "address to serve the Introspect API on (set to the VM's wg0 IP:port)")
 	meshVMID := flag.String("mesh-vm-id", "", "this VM's id; when set, subscribe to mesh updates on the event bus")
 	mountsVMID := flag.String("mounts-vm-id", "", "this VM's id; when set, subscribe to dynamic share-mount updates on the event bus")
+	sshKeysVMID := flag.String("sshkeys-vm-id", "", "this VM's id; when set, subscribe to dynamic SSH-keys updates on the event bus")
+	sshKeysAuthorizedKeys := flag.String("sshkeys-authorized-keys", "/root/.ssh/authorized_keys", "path to the authorized_keys file the sshkeys subscriber rewrites on each update")
+	sshKeysUID := flag.Int("sshkeys-uid", 0, "uid to chown authorized_keys to (-1 to skip)")
+	sshKeysGID := flag.Int("sshkeys-gid", 0, "gid to chown authorized_keys to (-1 to skip)")
 	shareMounts := flag.String("share-mounts", "", "path to a JSON array of boot-time share mounts to apply at startup")
 	natsURL := flag.String("nats-url", nats.DefaultURL, "event-bus URL for mesh/mount updates")
 	natsCreds := flag.String("nats-creds", "", "path to NATS credentials (the per-project creds staged into the VM)")
@@ -60,6 +65,13 @@ func main() {
 	if *mountsVMID != "" {
 		if err := startMounts(*natsURL, *natsCreds, *mountsVMID, reg, logger); err != nil {
 			logger.Fatalf("weft-vm-agent: mounts: %v", err)
+		}
+	}
+
+	if *sshKeysVMID != "" {
+		if err := startSSHKeys(*natsURL, *natsCreds, *sshKeysVMID,
+			*sshKeysAuthorizedKeys, *sshKeysUID, *sshKeysGID, logger); err != nil {
+			logger.Fatalf("weft-vm-agent: sshkeys: %v", err)
 		}
 	}
 
@@ -116,6 +128,30 @@ func startMounts(url, creds, vmID string, reg *cubefs.Registry, logger *log.Logg
 		return err
 	}
 	logger.Printf("weft-vm-agent: mounts subscribed on %s", agentmounts.Subject(vmID))
+	return nil
+}
+
+// startSSHKeys connects to the event bus and subscribes to this VM's
+// SSH-keys updates, rewriting the target user's authorized_keys
+// atomically on each push. Same Subscriber+ApplyFunc pattern as
+// mesh / mounts — state is whole, not diffed, so a missed message
+// self-heals on the next publish (an empty set is a valid "revoke
+// all" state and is also applied).
+func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, logger *log.Logger) error {
+	var opts []nats.Option
+	if creds != "" {
+		opts = append(opts, nats.UserCredentials(creds))
+	}
+	nc, err := nats.Connect(url, opts...)
+	if err != nil {
+		return err
+	}
+	sub := agentsshkeys.NewSubscriber(nc, vmID, sshKeysApplyer(authorizedKeysPath, uid, gid), logger)
+	if _, err := sub.Start(); err != nil {
+		nc.Close()
+		return err
+	}
+	logger.Printf("weft-vm-agent: sshkeys subscribed on %s -> %s", agentsshkeys.Subject(vmID), authorizedKeysPath)
 	return nil
 }
 
