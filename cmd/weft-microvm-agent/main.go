@@ -25,6 +25,7 @@ import (
 	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
 	"github.com/openweft/weft-microvm-agent/pkg/cubefs"
 	agentfirewall "github.com/openweft/weft-microvm-agent/pkg/firewall"
+	agentfirewallstatus "github.com/openweft/weft-microvm-agent/pkg/firewallstatus"
 	"github.com/openweft/weft-microvm-agent/pkg/introspectsrv"
 	agentmesh "github.com/openweft/weft-microvm-agent/pkg/mesh"
 	agentmounts "github.com/openweft/weft-microvm-agent/pkg/mounts"
@@ -55,6 +56,7 @@ type opts struct {
 	meshVMID              string
 	mountsVMID            string
 	firewallVMID          string
+	firewallStatusEvery   time.Duration
 	sshKeysVMID           string
 	sshKeysAuthorizedKeys string
 	sshKeysUID            int
@@ -97,6 +99,7 @@ insecure credentials.`,
 	f.StringVar(&o.meshVMID, "mesh-vm-id", "", "this VM's id; when set, subscribe to mesh updates on the event bus")
 	f.StringVar(&o.mountsVMID, "mounts-vm-id", "", "this VM's id; when set, subscribe to dynamic share-mount updates on the event bus")
 	f.StringVar(&o.firewallVMID, "firewall-vm-id", "", "this VM's id; when set, subscribe to dynamic Security-Group firewall updates on the event bus and reconcile nftables")
+	f.DurationVar(&o.firewallStatusEvery, "firewall-status-every", 10*time.Second, "how often the firewall status emitter publishes pod.FirewallStatus on weft.firewall.<vm-id>.status (only active when --firewall-vm-id is set; 0 disables the emitter)")
 	f.StringVar(&o.sshKeysVMID, "sshkeys-vm-id", "", "this VM's id; when set, subscribe to dynamic SSH-keys updates on the event bus")
 	f.StringVar(&o.sshKeysAuthorizedKeys, "sshkeys-authorized-keys", "/root/.ssh/authorized_keys", "authorized_keys file the sshkeys subscriber rewrites on each update")
 	f.IntVar(&o.sshKeysUID, "sshkeys-uid", 0, "uid to chown authorized_keys to (-1 to skip)")
@@ -173,6 +176,15 @@ func run(o opts) error {
 			return fmt.Errorf("firewall: %w", err)
 		}
 		natsConns = append(natsConns, nc)
+
+		if o.firewallStatusEvery > 0 {
+			snc, cancel, err := startFirewallStatus(o.natsURL, o.natsCreds, o.firewallVMID, o.firewallStatusEvery, rec, logger)
+			if err != nil {
+				return fmt.Errorf("firewall status: %w", err)
+			}
+			natsConns = append(natsConns, snc)
+			defer cancel()
+		}
 	}
 
 	// Shared AuthStore: the sshkeys subscriber writes into it on every NATS
@@ -362,6 +374,38 @@ func startFirewall(url, creds, vmID string, rec *metrics.Recorder, logger *log.L
 	}
 	logger.Printf("weft-microvm-agent: firewall subscribed on %s", agentfirewall.Subject(vmID))
 	return nc, nil
+}
+
+// startFirewallStatus connects to the event bus and runs the firewall
+// status emitter (reverse direction of startFirewall: pushes
+// pod.FirewallStatus on weft.firewall.<vm-id>.status every `every`
+// seconds). Returns the conn (so main can close it on shutdown) and
+// a cancel func that stops the emitter goroutine cooperatively.
+func startFirewallStatus(url, creds, vmID string, every time.Duration, rec *metrics.Recorder, logger *log.Logger) (*nats.Conn, context.CancelFunc, error) {
+	var opts []nats.Option
+	if creds != "" {
+		opts = append(opts, nats.UserCredentials(creds))
+	}
+	nc, err := nats.Connect(url, opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	rec.SetNATSConnected(true)
+	em, err := agentfirewallstatus.New(nc, vmID, firewallStatusRead, every, logger)
+	if err != nil {
+		nc.Close()
+		rec.SetNATSConnected(false)
+		return nil, nil, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		if err := em.Run(ctx); err != nil && err != context.Canceled {
+			logger.Printf("weft-microvm-agent: firewall status: %v", err)
+		}
+	}()
+	logger.Printf("weft-microvm-agent: firewall status emitter on %s every %s",
+		agentfirewallstatus.Subject(vmID), every)
+	return nc, cancel, nil
 }
 
 // startSSHKeys connects to the event bus and subscribes to this VM's
