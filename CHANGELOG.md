@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Firewall status emitter** (reverse direction of the SG
+  subscriber). New `pkg/firewallstatus` runs a 10-second ticker
+  (`--firewall-status-every`) that polls the in-VM nftables
+  `weft-fw` table via `network.ReadFirewallStatus` and publishes
+  a `pod.FirewallStatus` JSON on `weft.firewall.<vm-id>.status`.
+  Same pattern `weft-router`'s `statusemitter` uses for its
+  `RouterStatus`. Auto-active when `--firewall-vm-id` is set ;
+  first publish fires immediately on Run entry so dashboards see
+  a value inside a second of boot. New `firewall_linux.go` /
+  `firewall_other.go` tag split binds `firewallStatusRead` to
+  `network.ReadFirewallStatus` on Linux and to a "requires linux"
+  stub on darwin. Commit `354de43`.
+
 ## [0.2.0] - 2026-06-02
 
 ### Added
