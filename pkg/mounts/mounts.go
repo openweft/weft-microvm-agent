@@ -23,8 +23,8 @@ import (
 // mesh updates), so the guest only ever trusts its own subject.
 func Subject(vmID string) string { return "weft.mounts." + vmID }
 
-// ApplyFunc mounts or unmounts an SFTP share. The real implementation
-// drives the FUSE+SFTP engine (Linux); tests inject a stub.
+// ApplyFunc mounts or unmounts one share according to spec.Action. The real
+// implementation drives the CubeFS FUSE client (Linux); tests inject a stub.
 type ApplyFunc func(pod.ShareMount) error
 
 // HandleMessage decodes a published mount update and applies it. Pure
@@ -61,10 +61,23 @@ func NewSubscriber(nc *nats.Conn, vmID string, apply ApplyFunc, logger *log.Logg
 // is live until unsubscribed or the connection drops.
 func (s *Subscriber) Start() (*nats.Subscription, error) {
 	return s.nc.Subscribe(Subject(s.vmID), func(m *nats.Msg) {
-		if err := HandleMessage(m.Data, s.apply); err != nil {
+		var last pod.ShareMount
+		// Capture the validated spec via a wrapping apply so the log line
+		// can mention what was applied without re-decoding the payload and
+		// without changing the HandleMessage contract shared by all
+		// per-concern Subscribers in this agent.
+		err := HandleMessage(m.Data, func(spec pod.ShareMount) error {
+			last = spec
+			return s.apply(spec)
+		})
+		if err != nil {
 			s.logger.Printf("mounts: %v", err)
 			return
 		}
-		s.logger.Printf("mounts: applied update for %s", s.vmID)
+		action := last.Action
+		if action == "" {
+			action = pod.MountAction("mount")
+		}
+		s.logger.Printf("mounts: applied %s id=%s mount=%s", action, last.ID, last.MountPoint)
 	})
 }

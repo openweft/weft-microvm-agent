@@ -21,18 +21,31 @@ var runRoot = "/run/weft/cubefs"
 type Mounted struct {
 	mountPoint string
 	cmd        *exec.Cmd
+	logf       *os.File      // owned; closed on Unmount
+	exited     chan struct{} // closed by the reaper goroutine once cmd has exited
 }
 
 // MountPoint reports where the share is mounted in the guest.
 func (m *Mounted) MountPoint() string { return m.mountPoint }
 
 // Unmount detaches the FUSE mount then stops cfs-client. Best-effort: the
-// kernel mount is removed even if stopping the process errs.
+// kernel mount is removed even if stopping the process errs. Waits for the
+// reaper goroutine so the process is fully reaped before the log file is
+// closed.
 func (m *Mounted) Unmount() error {
 	uerr := unmountPath(m.mountPoint)
 	if m.cmd != nil && m.cmd.Process != nil {
+		// Kill is harmless (ESRCH, ignored) if the reaper already saw
+		// cfs-client die on its own — e.g. because fusermount detached the
+		// mount above and cfs-client exited.
 		_ = m.cmd.Process.Kill()
-		_, _ = m.cmd.Process.Wait()
+	}
+	if m.exited != nil {
+		<-m.exited
+	}
+	if m.logf != nil {
+		_ = m.logf.Close()
+		m.logf = nil
 	}
 	return uerr
 }
@@ -64,20 +77,33 @@ func Mount(spec pod.ShareMount) (*Mounted, error) {
 	// -f keeps cfs-client in the foreground so we own the process and can
 	// stop it on unmount, rather than it daemonising away.
 	cmd := exec.Command(Binary, "-f", "-c", cfgPath)
-	logf, err := os.Create(filepath.Join(logDir, "cfs-client.out"))
-	if err == nil {
+	logf, _ := os.Create(filepath.Join(logDir, "cfs-client.out"))
+	if logf != nil {
 		cmd.Stdout = logf
 		cmd.Stderr = logf
 	}
 	if err := cmd.Start(); err != nil {
+		if logf != nil {
+			_ = logf.Close()
+		}
 		return nil, fmt.Errorf("start cfs-client: %w", err)
 	}
+	// Reaper: ensures cfs-client never becomes a zombie if it exits on its
+	// own (network drop, OOM, misconfig) before Unmount is called.
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
 	if err := waitMounted(spec.MountPoint, 30*time.Second); err != nil {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		<-exited
+		if logf != nil {
+			_ = logf.Close()
+		}
 		return nil, fmt.Errorf("cubefs %q: %w", spec.ID, err)
 	}
-	return &Mounted{mountPoint: spec.MountPoint, cmd: cmd}, nil
+	return &Mounted{mountPoint: spec.MountPoint, cmd: cmd, logf: logf, exited: exited}, nil
 }
 
 // waitMounted polls /proc/mounts until target appears as a mount or the
