@@ -24,6 +24,7 @@ import (
 	"github.com/openweft/weft-microvm-agent/internal/metrics"
 	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
 	"github.com/openweft/weft-microvm-agent/pkg/cubefs"
+	agentfirewall "github.com/openweft/weft-microvm-agent/pkg/firewall"
 	"github.com/openweft/weft-microvm-agent/pkg/introspectsrv"
 	agentmesh "github.com/openweft/weft-microvm-agent/pkg/mesh"
 	agentmounts "github.com/openweft/weft-microvm-agent/pkg/mounts"
@@ -53,6 +54,7 @@ type opts struct {
 	listenAddr            string
 	meshVMID              string
 	mountsVMID            string
+	firewallVMID          string
 	sshKeysVMID           string
 	sshKeysAuthorizedKeys string
 	sshKeysUID            int
@@ -94,6 +96,7 @@ insecure credentials.`,
 	f.StringVar(&o.listenAddr, "listen", "0.0.0.0:51999", "address to serve the Introspect API on (set to the VM's wg0 IP:port)")
 	f.StringVar(&o.meshVMID, "mesh-vm-id", "", "this VM's id; when set, subscribe to mesh updates on the event bus")
 	f.StringVar(&o.mountsVMID, "mounts-vm-id", "", "this VM's id; when set, subscribe to dynamic share-mount updates on the event bus")
+	f.StringVar(&o.firewallVMID, "firewall-vm-id", "", "this VM's id; when set, subscribe to dynamic Security-Group firewall updates on the event bus and reconcile nftables")
 	f.StringVar(&o.sshKeysVMID, "sshkeys-vm-id", "", "this VM's id; when set, subscribe to dynamic SSH-keys updates on the event bus")
 	f.StringVar(&o.sshKeysAuthorizedKeys, "sshkeys-authorized-keys", "/root/.ssh/authorized_keys", "authorized_keys file the sshkeys subscriber rewrites on each update")
 	f.IntVar(&o.sshKeysUID, "sshkeys-uid", 0, "uid to chown authorized_keys to (-1 to skip)")
@@ -147,16 +150,29 @@ func run(o opts) error {
 		}
 	}
 
+	var natsConns []*nats.Conn
 	if o.meshVMID != "" {
-		if err := startMesh(o.natsURL, o.natsCreds, o.meshVMID, rec, logger); err != nil {
+		nc, err := startMesh(o.natsURL, o.natsCreds, o.meshVMID, rec, logger)
+		if err != nil {
 			return fmt.Errorf("mesh: %w", err)
 		}
+		natsConns = append(natsConns, nc)
 	}
 
 	if o.mountsVMID != "" {
-		if err := startMounts(o.natsURL, o.natsCreds, o.mountsVMID, reg, rec, logger); err != nil {
+		nc, err := startMounts(o.natsURL, o.natsCreds, o.mountsVMID, reg, rec, logger)
+		if err != nil {
 			return fmt.Errorf("mounts: %w", err)
 		}
+		natsConns = append(natsConns, nc)
+	}
+
+	if o.firewallVMID != "" {
+		nc, err := startFirewall(o.natsURL, o.natsCreds, o.firewallVMID, rec, logger)
+		if err != nil {
+			return fmt.Errorf("firewall: %w", err)
+		}
+		natsConns = append(natsConns, nc)
 	}
 
 	// Shared AuthStore: the sshkeys subscriber writes into it on every NATS
@@ -166,10 +182,12 @@ func run(o opts) error {
 	authStore := agentsshd.NewAuthStore()
 
 	if o.sshKeysVMID != "" {
-		if err := startSSHKeys(o.natsURL, o.natsCreds, o.sshKeysVMID,
-			o.sshKeysAuthorizedKeys, o.sshKeysUID, o.sshKeysGID, authStore, rec, logger); err != nil {
+		nc, err := startSSHKeys(o.natsURL, o.natsCreds, o.sshKeysVMID,
+			o.sshKeysAuthorizedKeys, o.sshKeysUID, o.sshKeysGID, authStore, rec, logger)
+		if err != nil {
 			return fmt.Errorf("sshkeys: %w", err)
 		}
+		natsConns = append(natsConns, nc)
 	}
 
 	if o.sshdListen != "" {
@@ -178,19 +196,28 @@ func run(o opts) error {
 		}
 	}
 
+	// Cooperative shutdown : SIGINT / SIGTERM triggers GracefulStop on
+	// gRPC so in-flight Introspect calls finish before exit. The
+	// metrics HTTP listener shuts down in parallel ; the 5s bound is
+	// plenty for an idle scrape connection to drain.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// First-boot provisioning: watch the property tree for weft.boot/* to
 	// appear, then run the configured payload + script exactly once
 	// (sentinel-guarded). Disabled when --boot-watch isn't set; also a fast
 	// no-op when the sentinel already exists (subsequent reboots).
 	if o.bootWatch {
 		runner := bootRunner(o.bootWorkDir, o.bootSentinel, logger.Writer())
-		go watchAndRunBoot(o.propsDir, runner, rec, logger)
+		go watchAndRunBoot(ctx, o.propsDir, runner, rec, logger)
 	}
 
 	if o.propsVMID != "" {
-		if err := startProperties(o.natsURL, o.natsCreds, o.propsVMID, o.propsDir, rec, logger); err != nil {
+		nc, err := startProperties(o.natsURL, o.natsCreds, o.propsVMID, o.propsDir, rec, logger)
+		if err != nil {
 			return fmt.Errorf("properties: %w", err)
 		}
+		natsConns = append(natsConns, nc)
 	}
 
 	lis, err := net.Listen("tcp", o.listenAddr)
@@ -225,12 +252,6 @@ func run(o opts) error {
 		}()
 	}
 
-	// Cooperative shutdown : SIGINT / SIGTERM triggers GracefulStop on
-	// gRPC so in-flight Introspect calls finish before exit. The
-	// metrics HTTP listener shuts down in parallel ; the 5s bound is
-	// plenty for an idle scrape connection to drain.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		logger.Printf("weft-microvm-agent: signal received ; graceful stop")
@@ -238,6 +259,9 @@ func run(o opts) error {
 			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = metricsSrv.Shutdown(shutCtx)
+		}
+		for _, nc := range natsConns {
+			nc.Close()
 		}
 		srv.GracefulStop()
 	}()
@@ -253,14 +277,14 @@ func run(o opts) error {
 // updates, applying each via meshApply (kernel netlink on Linux). The
 // recorded apply is wrapped around the production ApplyFunc so every
 // mesh update lands in weft_microvm_agent_apply_total{concern="mesh"}.
-func startMesh(url, creds, vmID string, rec *metrics.Recorder, logger *log.Logger) error {
+func startMesh(url, creds, vmID string, rec *metrics.Recorder, logger *log.Logger) (*nats.Conn, error) {
 	var opts []nats.Option
 	if creds != "" {
 		opts = append(opts, nats.UserCredentials(creds))
 	}
 	nc, err := nats.Connect(url, opts...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	rec.SetNATSConnected(true)
 	apply := func(wg *pod.WireGuard) error {
@@ -273,24 +297,24 @@ func startMesh(url, creds, vmID string, rec *metrics.Recorder, logger *log.Logge
 	if _, err := sub.Start(); err != nil {
 		nc.Close()
 		rec.SetNATSConnected(false)
-		return err
+		return nil, err
 	}
 	logger.Printf("weft-microvm-agent: mesh subscribed on %s", agentmesh.Subject(vmID))
-	return nil
+	return nc, nil
 }
 
 // startMounts connects to the event bus and subscribes to this VM's
 // dynamic share-mount updates, applying each via the shared registry
 // (mount/unmount, replace-by-ID). This is what lets a teacher publish a
 // share onto a class of student VMs at runtime.
-func startMounts(url, creds, vmID string, reg *cubefs.Registry, rec *metrics.Recorder, logger *log.Logger) error {
+func startMounts(url, creds, vmID string, reg *cubefs.Registry, rec *metrics.Recorder, logger *log.Logger) (*nats.Conn, error) {
 	var opts []nats.Option
 	if creds != "" {
 		opts = append(opts, nats.UserCredentials(creds))
 	}
 	nc, err := nats.Connect(url, opts...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	rec.SetNATSConnected(true)
 	apply := func(m pod.ShareMount) error {
@@ -303,10 +327,41 @@ func startMounts(url, creds, vmID string, reg *cubefs.Registry, rec *metrics.Rec
 	if _, err := sub.Start(); err != nil {
 		nc.Close()
 		rec.SetNATSConnected(false)
-		return err
+		return nil, err
 	}
 	logger.Printf("weft-microvm-agent: mounts subscribed on %s", agentmounts.Subject(vmID))
-	return nil
+	return nc, nil
+}
+
+// startFirewall connects to the event bus and subscribes to this VM's
+// firewall ruleset updates, applying each via firewallApply (real
+// nftables reconciler on Linux, stub on darwin). Whole-state push:
+// the agent atomically replaces the "weft-fw" table on every message,
+// so a missed delivery self-heals on the next publish.
+func startFirewall(url, creds, vmID string, rec *metrics.Recorder, logger *log.Logger) (*nats.Conn, error) {
+	var opts []nats.Option
+	if creds != "" {
+		opts = append(opts, nats.UserCredentials(creds))
+	}
+	nc, err := nats.Connect(url, opts...)
+	if err != nil {
+		return nil, err
+	}
+	rec.SetNATSConnected(true)
+	apply := func(fw *pod.Firewall) error {
+		start := time.Now()
+		err := firewallApply(fw)
+		rec.RecordApply("firewall", err, time.Since(start))
+		return err
+	}
+	sub := agentfirewall.NewSubscriber(nc, vmID, apply, logger)
+	if _, err := sub.Start(); err != nil {
+		nc.Close()
+		rec.SetNATSConnected(false)
+		return nil, err
+	}
+	logger.Printf("weft-microvm-agent: firewall subscribed on %s", agentfirewall.Subject(vmID))
+	return nc, nil
 }
 
 // startSSHKeys connects to the event bus and subscribes to this VM's
@@ -321,14 +376,14 @@ func startMounts(url, creds, vmID string, reg *cubefs.Registry, rec *metrics.Rec
 //
 // authStore may be nil if the embedded sshd is disabled; the
 // authorized_keys writer still runs for backward compat.
-func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, authStore *agentsshd.AuthStore, rec *metrics.Recorder, logger *log.Logger) error {
+func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, authStore *agentsshd.AuthStore, rec *metrics.Recorder, logger *log.Logger) (*nats.Conn, error) {
 	var opts []nats.Option
 	if creds != "" {
 		opts = append(opts, nats.UserCredentials(creds))
 	}
 	nc, err := nats.Connect(url, opts...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	rec.SetNATSConnected(true)
 	// Compose the apply: both writes happen, both errors are surfaced. The
@@ -350,10 +405,10 @@ func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, aut
 	if _, err := sub.Start(); err != nil {
 		nc.Close()
 		rec.SetNATSConnected(false)
-		return err
+		return nil, err
 	}
 	logger.Printf("weft-microvm-agent: sshkeys subscribed on %s -> authorized_keys=%s + AuthStore", agentsshkeys.Subject(vmID), authorizedKeysPath)
-	return nil
+	return nc, nil
 }
 
 // startSSHD wires the embedded SSH server: loads (or generates) the
@@ -388,14 +443,14 @@ func startSSHD(listen, hostKeyPath, shell string, authStore *agentsshd.AuthStore
 // (file-per-key, "/" → directory nesting). Any in-VM process reads via
 // `cat <propertiesDir>/<key>`. Replace-set semantics: an empty publish
 // clears the tree, missed messages self-heal on next publish.
-func startProperties(url, creds, vmID, propertiesDir string, rec *metrics.Recorder, logger *log.Logger) error {
+func startProperties(url, creds, vmID, propertiesDir string, rec *metrics.Recorder, logger *log.Logger) (*nats.Conn, error) {
 	var opts []nats.Option
 	if creds != "" {
 		opts = append(opts, nats.UserCredentials(creds))
 	}
 	nc, err := nats.Connect(url, opts...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	rec.SetNATSConnected(true)
 	inner := propertiesApplyer(propertiesDir)
@@ -409,10 +464,10 @@ func startProperties(url, creds, vmID, propertiesDir string, rec *metrics.Record
 	if _, err := sub.Start(); err != nil {
 		nc.Close()
 		rec.SetNATSConnected(false)
-		return err
+		return nil, err
 	}
 	logger.Printf("weft-microvm-agent: properties subscribed on %s -> %s", agentproperties.Subject(vmID), propertiesDir)
-	return nil
+	return nc, nil
 }
 
 // watchAndRunBoot polls the property tree for weft.boot/* and runs the
@@ -425,16 +480,20 @@ func startProperties(url, creds, vmID, propertiesDir string, rec *metrics.Record
 // Bails after maxWait without a request — the operator may have stamped no
 // boot config, in which case the sentinel is written anyway so future polls
 // return immediately.
-func watchAndRunBoot(propsDir string, runner *agentboot.Runner, rec *metrics.Recorder, logger *log.Logger) {
+func watchAndRunBoot(shutdownCtx context.Context, propsDir string, runner *agentboot.Runner, rec *metrics.Recorder, logger *log.Logger) {
 	const (
 		pollEvery = 2 * time.Second
 		maxWait   = 5 * time.Minute
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), maxWait+30*time.Second)
+	ctx, cancel := context.WithTimeout(shutdownCtx, maxWait+30*time.Second)
 	defer cancel()
 
 	deadline := time.Now().Add(maxWait)
 	for {
+		if shutdownCtx.Err() != nil {
+			logger.Printf("weft-microvm-agent: boot watcher exiting on shutdown")
+			return
+		}
 		// Sentinel already there? Subsequent reboot; nothing to do.
 		if _, err := os.Stat(runner.SentinelPath); err == nil {
 			logger.Printf("weft-microvm-agent: boot sentinel present, skipping")
@@ -444,7 +503,11 @@ func watchAndRunBoot(propsDir string, runner *agentboot.Runner, rec *metrics.Rec
 		cfg, err := agentboot.ReadFromPropertiesDir(propsDir)
 		if err != nil {
 			logger.Printf("weft-microvm-agent: boot read %s: %v", propsDir, err)
-			time.Sleep(pollEvery)
+			select {
+			case <-shutdownCtx.Done():
+				return
+			case <-time.After(pollEvery):
+			}
 			continue
 		}
 
@@ -472,7 +535,11 @@ func watchAndRunBoot(propsDir string, runner *agentboot.Runner, rec *metrics.Rec
 			rec.RecordApply("boot", err, time.Since(start))
 			return
 		}
-		time.Sleep(pollEvery)
+		select {
+		case <-shutdownCtx.Done():
+			return
+		case <-time.After(pollEvery):
+		}
 	}
 }
 
