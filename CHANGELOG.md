@@ -7,6 +7,18 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- **Shutdown leaks** : the SIGTERM handler now closes the embedded
+  sshd listener and calls `cubefs.Registry.UnmountAll()` before
+  `GracefulStop`. Pre-fix, the sshd Accept loop survived as a
+  leaked goroutine until poweroff, and live CubeFS FUSE mounts
+  (plus their `cfs-client` processes) outlived a cooperative
+  shutdown — preventing the same VM's reboot from cleanly
+  re-mounting at the same paths. The sshd path also swallows
+  `net.ErrClosed` from the deliberate close so the shutdown log
+  stays quiet on the happy path.
+
 ### Added
 
 - **Firewall status emitter** (reverse direction of the SG
