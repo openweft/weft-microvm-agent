@@ -202,10 +202,13 @@ func run(o opts) error {
 		natsConns = append(natsConns, nc)
 	}
 
+	var sshdLn net.Listener
 	if o.sshdListen != "" {
-		if err := startSSHD(o.sshdListen, o.sshdHostKey, o.sshdShell, authStore, logger); err != nil {
+		ln, err := startSSHD(o.sshdListen, o.sshdHostKey, o.sshdShell, authStore, logger)
+		if err != nil {
 			return fmt.Errorf("sshd: %w", err)
 		}
+		sshdLn = ln
 	}
 
 	// Cooperative shutdown : SIGINT / SIGTERM triggers GracefulStop on
@@ -274,6 +277,23 @@ func run(o opts) error {
 		}
 		for _, nc := range natsConns {
 			nc.Close()
+		}
+		// Close the embedded sshd listener (if any) so its Accept loop
+		// returns net.ErrClosed and the goroutine winds down. Without
+		// this the goroutine outlives the gRPC server's GracefulStop
+		// and is only torn down when the kernel poweroffs the VM.
+		if sshdLn != nil {
+			_ = sshdLn.Close()
+		}
+		// Detach FUSE mounts + reap cfs-client processes the registry
+		// owns. Without this, on a normal shutdown the kernel keeps
+		// the FUSE mounts hanging (next boot can't reuse the same
+		// mount point cleanly) and cfs-client survives as a zombie
+		// reparented to PID 1 until poweroff. UnmountAll is
+		// best-effort : the first error surfaces in the log, the
+		// rest are dropped, no shutdown blocking.
+		if err := reg.UnmountAll(); err != nil {
+			logger.Printf("weft-microvm-agent: unmount-all on shutdown: %v", err)
 		}
 		srv.GracefulStop()
 	}()
@@ -460,26 +480,36 @@ func startSSHKeys(url, creds, vmID, authorizedKeysPath string, uid, gid int, aut
 // binds the listener, and serves in a goroutine. Failures during
 // listener binding are fatal (returned to caller); per-connection
 // errors are logged + dropped.
-func startSSHD(listen, hostKeyPath, shell string, authStore *agentsshd.AuthStore, logger *log.Logger) error {
+//
+// Returns the bound net.Listener so the caller can close it on
+// shutdown — the Server's Accept loop returns cleanly once Close is
+// called, draining the goroutine instead of leaking it for the
+// remainder of the agent's lifetime. Pre-fix the agent had no handle
+// on the listener and on a clean SIGTERM the sshd goroutine kept
+// running until poweroff dropped it.
+func startSSHD(listen, hostKeyPath, shell string, authStore *agentsshd.AuthStore, logger *log.Logger) (net.Listener, error) {
 	signer, err := agentsshd.LoadOrCreateHostKey(hostKeyPath)
 	if err != nil {
-		return fmt.Errorf("host key %s: %w", hostKeyPath, err)
+		return nil, fmt.Errorf("host key %s: %w", hostKeyPath, err)
 	}
 	srv, err := agentsshd.NewServer(authStore, signer, shell, logger)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", listen, err)
+		return nil, fmt.Errorf("listen %s: %w", listen, err)
 	}
 	logger.Printf("weft-microvm-agent: sshd on %s (host key %s)", ln.Addr(), hostKeyPath)
 	go func() {
-		if err := srv.Serve(ln); err != nil {
+		// errClosed surfaces on a deliberate Close of the listener
+		// during shutdown — log at info-equivalent (Printf) only when
+		// it's something else.
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, net.ErrClosed) {
 			logger.Printf("weft-microvm-agent: sshd serve: %v", err)
 		}
 	}()
-	return nil
+	return ln, nil
 }
 
 // startProperties connects to the event bus and subscribes to this VM's
