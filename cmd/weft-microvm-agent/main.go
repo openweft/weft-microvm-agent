@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -34,6 +35,7 @@ import (
 	agentsshkeys "github.com/openweft/weft-microvm-agent/pkg/sshkeys"
 	"github.com/openweft/weft-microvm-init/pkg/pod"
 	introspectv1 "github.com/openweft/weft-proto/introspectv1"
+	weftslognats "github.com/openweft/weft-slognats"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 )
@@ -129,6 +131,23 @@ insecure credentials.`,
 // without forcing the helpers below to call log.Fatal. The final
 // gRPC Serve call blocks; an early exit before it means a setup error.
 func run(o opts) error {
+	// Fan slog records out to NATS in addition to stderr. Subject uses
+	// $WEFT_VM_UUID (set by weft-init from the kernel cmdline / cidata),
+	// falling back to hostname so a unit-test invocation is still
+	// well-formed. The legacy `log` package keeps writing to stderr ;
+	// this layer is purely additive for structured logs.
+	vmID := os.Getenv("WEFT_VM_UUID")
+	if vmID == "" {
+		if h, err := os.Hostname(); err == nil {
+			vmID = h
+		} else {
+			vmID = "unknown"
+		}
+	}
+	natsLog, logCloser := weftslognats.SetupFromEnv("weft.microvm-agent." + vmID + ".log")
+	defer logCloser.Close()
+	slog.SetDefault(natsLog)
+
 	logger := log.Default()
 
 	// cfs-client ships in the initramfs at /bin/cfs-client (placed by the
