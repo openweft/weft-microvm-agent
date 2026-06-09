@@ -147,6 +147,10 @@ func run(o opts) error {
 	natsLog, logCloser := weftslognats.SetupFromEnv("weft.microvm-agent." + vmID + ".log")
 	defer logCloser.Close()
 	slog.SetDefault(natsLog)
+	// Capture Go panics via NATS slog fan-out so weft-doctor sees
+	// in-guest agent crashes alongside host-side agent crashes.
+	// Matches the pattern weft v0.4.9 introduced for the host agent.
+	defer weftslognats.PanicReporter("weft-microvm-agent")
 
 	logger := log.Default()
 
