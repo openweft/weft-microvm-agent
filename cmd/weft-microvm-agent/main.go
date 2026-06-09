@@ -24,7 +24,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/openweft/weft-microvm-agent/internal/metrics"
 	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
-	"github.com/openweft/weft-microvm-agent/pkg/cubefs"
+	"github.com/openweft/weft-microvm-init/pkg/cubefs"
 	agentfirewall "github.com/openweft/weft-microvm-agent/pkg/firewall"
 	agentfirewallstatus "github.com/openweft/weft-microvm-agent/pkg/firewallstatus"
 	"github.com/openweft/weft-microvm-agent/pkg/introspectsrv"
