@@ -9,7 +9,7 @@ require (
 	github.com/nats-io/nats.go v1.52.0
 	github.com/openweft/weft-microvm-init v0.0.0-00010101000000-000000000000
 	github.com/openweft/weft-proto v0.0.0
-	github.com/openweft/weft-slognats v0.2.0
+	github.com/openweft/weft-slognats v0.3.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.52.0
 	google.golang.org/grpc v1.81.1
