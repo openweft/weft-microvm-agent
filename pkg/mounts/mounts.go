@@ -57,10 +57,34 @@ func NewSubscriber(nc *nats.Conn, vmID string, apply ApplyFunc, logger *log.Logg
 	return &Subscriber{nc: nc, vmID: vmID, apply: apply, logger: logger}
 }
 
+// streamName is the JetStream stream the subscriber consumes from.
+// A stream with `last-per-subject` retention covering `weft.mounts.*`
+// is what gives boot-time replay : the agent's first subscribe gets
+// the most recent state for *its* subject, even if the publisher
+// emitted it before the VM was alive. Created on-demand by the
+// subscriber when the operator hasn't provisioned it.
+const streamName = "weft-mounts"
+
 // Start subscribes to the VM's mounts subject. The returned subscription
 // is live until unsubscribed or the connection drops.
+//
+// Two delivery modes :
+//
+//  1. JetStream (production) : a stream named `weft-mounts` with
+//     `weft.mounts.*` subjects + LastPerSubject retention is the
+//     boot-time replay guarantee — the subscriber's first connect
+//     gets the most recent ShareMount state for its VM, even if
+//     the publisher (e.g. loom-server) emitted it before the VM
+//     was alive. The subscriber auto-ensures the stream exists ;
+//     a re-attempt after a transient publisher failure is a no-op.
+//
+//  2. Core NATS (dev fallback) : when JetStream isn't available
+//     on the broker the subscriber falls back to a plain Subscribe,
+//     matching the original behaviour. Boot-time delivery is then
+//     best-effort (depends on publisher timing) but interactive
+//     publish-while-running keeps working.
 func (s *Subscriber) Start() (*nats.Subscription, error) {
-	return s.nc.Subscribe(Subject(s.vmID), func(m *nats.Msg) {
+	handler := func(m *nats.Msg) {
 		var last pod.ShareMount
 		// Capture the validated spec via a wrapping apply so the log line
 		// can mention what was applied without re-decoding the payload and
@@ -79,5 +103,59 @@ func (s *Subscriber) Start() (*nats.Subscription, error) {
 			action = pod.MountAction("mount")
 		}
 		s.logger.Printf("mounts: applied %s id=%s mount=%s", action, last.ID, last.MountPoint)
+	}
+
+	js, err := s.nc.JetStream()
+	if err != nil {
+		// Broker has no JetStream → fall back to core NATS so the
+		// publish-while-running path still works in dev.
+		s.logger.Printf("mounts: JetStream unavailable (%v) ; falling back to core NATS subscribe (boot-time replay disabled)", err)
+		return s.nc.Subscribe(Subject(s.vmID), handler)
+	}
+
+	if err := ensureStream(js); err != nil {
+		// Stream creation failed (no permission, broker rejected,
+		// stream already exists with incompatible config, …). Fall
+		// through to core NATS — interactive updates still work,
+		// only boot-time replay is lost.
+		s.logger.Printf("mounts: cannot ensure stream %s (%v) ; falling back to core NATS subscribe", streamName, err)
+		return s.nc.Subscribe(Subject(s.vmID), handler)
+	}
+
+	// DeliverLastPerSubject : on connect, replay the most recent
+	// message per subject — exactly the state the agent needs to
+	// reconstruct its desired mounts.
+	sub, err := js.Subscribe(Subject(s.vmID), handler,
+		nats.DeliverLastPerSubject(),
+		nats.AckNone(),
+	)
+	if err != nil {
+		s.logger.Printf("mounts: JetStream subscribe failed (%v) ; falling back to core NATS subscribe", err)
+		return s.nc.Subscribe(Subject(s.vmID), handler)
+	}
+	s.logger.Printf("mounts: JetStream consumer started on %s (DeliverLastPerSubject)", Subject(s.vmID))
+	return sub, nil
+}
+
+// ensureStream creates the weft-mounts stream when it's missing.
+// Idempotent : a pre-existing stream with the same subjects is
+// reported as OK ; one with a different shape is left alone (the
+// operator may have customised storage / replicas — we don't fight
+// them). The retention is the openweft default :
+// last-per-subject so each VM's most recent state is what a
+// subscriber replays.
+func ensureStream(js nats.JetStreamContext) error {
+	if _, err := js.StreamInfo(streamName); err == nil {
+		return nil
+	}
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:              streamName,
+		Subjects:          []string{"weft.mounts.*"},
+		Retention:         nats.LimitsPolicy,
+		Storage:           nats.FileStorage,
+		MaxMsgsPerSubject: 1,
+		Discard:           nats.DiscardOld,
+		Description:       "Per-VM share-mount intents ; last-per-subject so each VM's most recent state survives publisher restart + agent boot ordering.",
 	})
+	return err
 }
