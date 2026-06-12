@@ -24,6 +24,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/openweft/weft-microvm-agent/internal/metrics"
 	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
+	execsession "github.com/openweft/weft-microvm-agent/pkg/execsession"
 	"github.com/openweft/weft-microvm-init/pkg/cubefs"
 	agentfirewall "github.com/openweft/weft-microvm-agent/pkg/firewall"
 	agentfirewallstatus "github.com/openweft/weft-microvm-agent/pkg/firewallstatus"
@@ -72,6 +73,8 @@ type opts struct {
 	bootWorkDir           string
 	bootSentinel          string
 	shareMounts           string
+	execVMID              string
+	containersVMID        string
 	natsURL               string
 	natsCreds             string
 	metricsAddr           string
@@ -115,6 +118,8 @@ insecure credentials.`,
 	f.StringVar(&o.bootWorkDir, "boot-workdir", "/var/lib/weft/boot", "parent directory for the boot payload; <workdir>/payload is the git clone target + script CWD")
 	f.StringVar(&o.bootSentinel, "boot-sentinel", "/var/lib/weft/provisioned", "sentinel file; once present, boot provisioning is skipped (idempotent across reboots)")
 	f.StringVar(&o.shareMounts, "share-mounts", "", "path to a JSON array of boot-time share mounts to apply at startup")
+	f.StringVar(&o.execVMID, "exec-vm-id", "", "this VM's id; when set, subscribe to weft.exec.<vm-id>.open and pump pty sessions over NATS (powers loom-server shell + compile dispatch)")
+	f.StringVar(&o.containersVMID, "containers-vm-id", "", "this VM's id; when set, subscribe to weft.containers.<vm-id> and drive crun to reconcile the desired ContainerSet (powers tool images : texlive/markdown/golang/...)")
 	f.StringVar(&o.natsURL, "nats-url", nats.DefaultURL, "event-bus URL for mesh/mount updates")
 	f.StringVar(&o.natsCreds, "nats-creds", "", "path to NATS credentials (the per-project creds staged into the VM)")
 	// Distinct port from weft-network's :9100 so a host that ever
@@ -225,6 +230,28 @@ func run(o opts) error {
 		natsConns = append(natsConns, nc)
 	}
 
+	// Execsession subscriber : the loom-server (and any other event-
+	// bus client doing exec dispatch) publishes ExecRequest on
+	// weft.exec.<vmID>.open ; we spawn a pty per session + pump
+	// stdin/stdout over the matching in/out subjects. Wired here so
+	// the agent's single NATS connection pool is reused.
+	if o.execVMID != "" {
+		nc, err := startExecSession(o.natsURL, o.natsCreds, o.execVMID, logger)
+		if err != nil {
+			return fmt.Errorf("execsession: %w", err)
+		}
+		natsConns = append(natsConns, nc)
+	}
+
+	// Containers reconciler removed : tool images aren't pulled
+	// per-VM anymore. The loom-server unpacks each OCI image once
+	// into a host directory + exposes it via virtio-9p (R/O) at
+	// /opt/tools/<image>/ inside every guest. The wrappers in
+	// /usr/local/bin invoke `crun exec` against a pre-staged bundle
+	// whose root.path lives on that shared mount — 0 duplication,
+	// 0 per-VM pull latency, central upgrade story.
+	_ = o.containersVMID
+
 	var sshdLn net.Listener
 	if o.sshdListen != "" {
 		ln, err := startSSHD(o.sshdListen, o.sshdHostKey, o.sshdShell, authStore, logger)
@@ -326,6 +353,42 @@ func run(o opts) error {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// startExecSession connects to the event bus + wires the execsession
+// subscriber for this VM. Every weft.exec.<vmID>.open publish spawns
+// a pty (kind=shell → bash, kind=exec → crun exec into a container)
+// and pumps its stdin/stdout over the matching in/out subjects.
+// Powers the loom-server shell tab + compile dispatch.
+func startExecSession(url, creds, vmID string, logger *log.Logger) (*nats.Conn, error) {
+	var opts []nats.Option
+	if creds != "" {
+		opts = append(opts, nats.UserCredentials(creds))
+	}
+	nc, err := nats.Connect(url, opts...)
+	if err != nil {
+		return nil, err
+	}
+	sub := execsession.NewSubscriber(nc, vmID, logger)
+	// We don't wire ctx into the cobra RunE today ; pass
+	// context.Background() so the subscriber stays alive for the
+	// agent's whole lifetime + tear down via the natsConns.Close
+	// loop in main's defer.
+	if _, err := sub.Start(context.Background()); err != nil {
+		nc.Close()
+		return nil, err
+	}
+	logger.Printf("weft-microvm-agent: execsession subscribed on %s", execsession.SubjectOpen(vmID))
+	// Signal "agent up" on a deterministic subject so the loom-server
+	// (or any orchestrator) can mark the VM as ready without polling
+	// the agent's HTTP introspect endpoint. Best-effort : a publish
+	// failure here doesn't break the agent ; the subscriber's absence
+	// just means readiness is best-detected via the first shell open.
+	if err := nc.Publish("weft.agent."+vmID+".up", []byte("execsession")); err != nil {
+		logger.Printf("weft-microvm-agent: warn: failed to publish agent up: %v", err)
+	}
+	_ = nc.Flush()
+	return nc, nil
 }
 
 // startMesh connects to the event bus and subscribes to this VM's mesh
