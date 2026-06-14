@@ -47,6 +47,17 @@ type ReadFunc func() pod.FirewallStatus
 // audit, derived gauges) without ratcheting up the contract.
 type PublishHook func(err error)
 
+// ReadHook is the metrics seam for the drop-counter pair : Emitter
+// calls it exactly once per publishOnce invocation, right after the
+// ReadFunc returns, with the freshly observed
+// (DropsPackets, DropsBytes). cmd-side wiring routes it to
+// metrics.Recorder.RecordFirewallDrops, which folds the kernel's
+// reset-on-rebuild counter into a monotonic Prometheus counter pair.
+//
+// Symmetric to PublishHook : both fire on every publishOnce, neither
+// short-circuits the other, both are nil-by-default + safe-to-omit.
+type ReadHook func(packets, bytes uint64)
+
 // Emitter periodically reads + publishes FirewallStatus for one VM.
 type Emitter struct {
 	nc       *nats.Conn
@@ -56,6 +67,7 @@ type Emitter struct {
 	now      func() time.Time // injectable for tests
 	logger   *log.Logger
 	hook     PublishHook
+	readHook ReadHook
 }
 
 // New constructs an Emitter. interval <= 0 defaults to 10 s.
@@ -113,6 +125,19 @@ func (e *Emitter) SetMetricsHook(h PublishHook) {
 	e.hook = h
 }
 
+// SetReadHook installs a ReadHook the Emitter calls right after every
+// successful ReadFunc invocation, before the publish step. Passing nil
+// clears the hook. Wire from cmd/weft-microvm-agent at construction
+// time so the drop-counter accumulator sees every tick.
+//
+// Separate from SetMetricsHook because the two observe different
+// edges : ReadHook fires on every read (the kernel counter snapshot
+// is fresh whether or not the publish that follows succeeds),
+// PublishHook fires after the publish attempt.
+func (e *Emitter) SetReadHook(h ReadHook) {
+	e.readHook = h
+}
+
 // publishOnce reads, stamps, encodes, publishes. Errors are
 // swallowed after logging — we never let a transient hiccup stop
 // the ticker.
@@ -130,6 +155,9 @@ func (e *Emitter) publishOnce() {
 		}
 	}()
 	status := e.read()
+	if e.readHook != nil {
+		e.readHook(status.DropsPackets, status.DropsBytes)
+	}
 	status.PublishedAtUnix = e.now().Unix()
 	data, err := json.Marshal(status)
 	if err != nil {

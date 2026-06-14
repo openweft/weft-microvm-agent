@@ -6,13 +6,18 @@
 //   - weft_microvm_agent_apply_duration_seconds{concern}            — Apply latency histogram
 //   - weft_microvm_agent_nats_connected                             — 0/1 gauge
 //   - weft_microvm_agent_firewall_status_publishes_total{result}    — firewallstatus.Emitter publishOnce counter
+//   - weft_microvm_agent_firewall_drops_packets_total               — nftables drop tail-rule packet counter
+//   - weft_microvm_agent_firewall_drops_bytes_total                 — nftables drop tail-rule byte counter
 //
 // Each NATS-driven subscriber (mesh / mounts / sshkeys / properties /
 // boot) calls Recorder.RecordApply after running its ApplyFunc ; the
 // concern label routes the observation to the right time-series.
 // The firewallstatus emitter wires Recorder.RecordFirewallStatusPublish
 // via its PublishHook seam — parallel to RecordApply but specific to
-// the publish-loop reverse direction.
+// the publish-loop reverse direction. The same emitter additionally
+// calls Recorder.RecordFirewallDrops on every successful read so the
+// kernel's counter+drop tail-rule surfaces as a monotonic Prometheus
+// counter pair (rate() over them gives the live drop pps / Bps).
 //
 // Mirrors the shape of openweft/weft-network's internal/metrics
 // package — same Registry-not-Default policy, same Handler() wiring.
@@ -20,6 +25,7 @@ package metrics
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -41,6 +47,19 @@ type Recorder struct {
 	applyDuration           *prometheus.HistogramVec
 	natsConnected           prometheus.Gauge
 	firewallStatusPublishes *prometheus.CounterVec
+	firewallDropsPackets    prometheus.Counter
+	firewallDropsBytes      prometheus.Counter
+
+	// firewallDrops tracks the reset-aware accumulator state for the
+	// nftables drop tail-rule counter pair. The kernel resets its
+	// counter to 0 every time the table is rebuilt (a reconcile flush
+	// + reapply), but Prometheus counters must be monotonic — so we
+	// keep the last observed kernel value and only ever Add(delta>0)
+	// to the published counter. On reset (current < last) we treat
+	// the current value as a fresh accumulation and Add(current).
+	firewallDropsMu      sync.Mutex
+	firewallDropsLastPkt uint64
+	firewallDropsLastByt uint64
 }
 
 // New builds + registers the recorder against a fresh registry.
@@ -70,8 +89,16 @@ func New(version, commit, date string) *Recorder {
 			Name: "weft_microvm_agent_firewall_status_publishes_total",
 			Help: "Total FirewallStatus publishOnce invocations from the in-guest firewallstatus emitter, labelled by result (ok|error). Parallel to apply_total but specific to the reverse-direction publish loop.",
 		}, []string{"result"}),
+		firewallDropsPackets: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "weft_microvm_agent_firewall_drops_packets_total",
+			Help: "Total packets dropped by the nftables drop tail-rule on the in-guest firewall input chain, accumulated across kernel-table rebuilds (counter resets handled by the recorder). rate() yields live drop pps.",
+		}),
+		firewallDropsBytes: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "weft_microvm_agent_firewall_drops_bytes_total",
+			Help: "Total bytes dropped by the nftables drop tail-rule on the in-guest firewall input chain, accumulated across kernel-table rebuilds (counter resets handled by the recorder). rate() yields live drop Bps.",
+		}),
 	}
-	r.reg.MustRegister(r.buildInfo, r.applyTotal, r.applyDuration, r.natsConnected, r.firewallStatusPublishes)
+	r.reg.MustRegister(r.buildInfo, r.applyTotal, r.applyDuration, r.natsConnected, r.firewallStatusPublishes, r.firewallDropsPackets, r.firewallDropsBytes)
 	r.buildInfo.WithLabelValues(version, commit, date).Set(1)
 	return r
 }
@@ -119,6 +146,60 @@ func (r *Recorder) RecordFirewallStatusPublish(err error) {
 		result = "error"
 	}
 	r.firewallStatusPublishes.WithLabelValues(result).Inc()
+}
+
+// RecordFirewallDrops folds one observation of the nftables drop
+// tail-rule counter pair into the monotonic Prometheus counters.
+//
+// The kernel counter is reset to 0 every time the firewall reconciler
+// rebuilds the table (flush + reapply ; happens on every desired-state
+// change). Prometheus counters, however, are supposed to be monotonic
+// so rate() / increase() can detect process restarts vs real activity
+// via the standard counter-reset heuristic.
+//
+// The accumulator handles this : we keep the last raw (packets, bytes)
+// value we saw the kernel report. On each call :
+//
+//   - growth (current >= last) → Add(current - last) ; the published
+//     counter grows by the delta only.
+//   - reset (current < last)   → the kernel rebuilt its table ; we
+//     reseed last := 0 and Add(current) so the next interval's worth
+//     of drops shows up immediately.
+//
+// Packets and bytes are tracked independently in case the two
+// counters drift across a rebuild boundary (they always reset
+// together in practice, but the field-level guard keeps the
+// invariant honest).
+//
+// Nil-receiver-safe like RecordApply / RecordFirewallStatusPublish.
+// Guarded by a mutex because the firewallstatus emitter is the sole
+// caller today but the field is exposed to any future caller (e.g.
+// a pull-model reconciler that ticks on a different schedule).
+func (r *Recorder) RecordFirewallDrops(packets, bytes uint64) {
+	if r == nil {
+		return
+	}
+	r.firewallDropsMu.Lock()
+	defer r.firewallDropsMu.Unlock()
+
+	// Packets : delta if growing, full current value if the kernel
+	// reset (current < last).
+	if packets < r.firewallDropsLastPkt {
+		r.firewallDropsLastPkt = 0
+	}
+	if delta := packets - r.firewallDropsLastPkt; delta > 0 {
+		r.firewallDropsPackets.Add(float64(delta))
+	}
+	r.firewallDropsLastPkt = packets
+
+	// Bytes : symmetric to packets.
+	if bytes < r.firewallDropsLastByt {
+		r.firewallDropsLastByt = 0
+	}
+	if delta := bytes - r.firewallDropsLastByt; delta > 0 {
+		r.firewallDropsBytes.Add(float64(delta))
+	}
+	r.firewallDropsLastByt = bytes
 }
 
 // SetNATSConnected flips the gauge. Call once from the NATS
