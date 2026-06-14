@@ -103,6 +103,76 @@ func TestRun_PublishesOnTickAndImmediate(t *testing.T) {
 	cancel()
 }
 
+func TestSetMetricsHook_FiresOnEveryPublish(t *testing.T) {
+	srv, url := startNATS(t)
+	defer srv.Shutdown()
+
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer nc.Close()
+
+	em, err := New(nc, "vm-hook", okRead, 30*time.Millisecond, silentLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Hook captures every err the Emitter sees ; an unbuffered channel
+	// would deadlock the publish loop, so we use a buffered slot and
+	// drain it from the goroutine running the assertions.
+	hookCalls := make(chan error, 8)
+	em.SetMetricsHook(func(err error) {
+		select {
+		case hookCalls <- err:
+		default:
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go em.Run(ctx)
+
+	// Wait for two hook invocations : the immediate Run-entry publish
+	// + the first ticker tick. Both should report nil error against
+	// a live NATS server.
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-hookCalls:
+			if err != nil {
+				t.Errorf("hook[%d] err = %v, want nil", i, err)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("hook[%d]: timed out waiting", i)
+		}
+	}
+	cancel()
+}
+
+func TestSetMetricsHook_NilHookIsSafe(t *testing.T) {
+	// Default Emitter has no hook ; publishOnce must not panic. We
+	// exercise it directly (bypassing Run's ticker) by leaving the
+	// emitter's nc nil on the publish step is unsafe — instead we
+	// use a live NATS conn but skip the hook wiring.
+	srv, url := startNATS(t)
+	defer srv.Shutdown()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer nc.Close()
+
+	em, err := New(nc, "vm-nilhook", okRead, time.Hour, silentLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// No SetMetricsHook call : the hook field stays nil. publishOnce
+	// must run cleanly. We call it directly via Run so we cover the
+	// defer block too.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_ = em.Run(ctx) // returns when ctx fires ; no panic = pass
+}
+
 func waitFor(t *testing.T, ch <-chan pod.FirewallStatus, d time.Duration) pod.FirewallStatus {
 	t.Helper()
 	select {

@@ -83,6 +83,24 @@ func TestNilReceiverNoPanic(t *testing.T) {
 	var r *Recorder
 	r.RecordApply("mesh", nil, time.Millisecond)
 	r.SetNATSConnected(true)
+	r.RecordFirewallStatusPublish(nil)
+}
+
+func TestRecordFirewallStatusPublish_OkAndError(t *testing.T) {
+	r := New("dev", "none", "unknown")
+	r.RecordFirewallStatusPublish(nil)
+	r.RecordFirewallStatusPublish(nil)
+	r.RecordFirewallStatusPublish(errors.New("nats: connection closed"))
+
+	body := scrape(t, r)
+	for _, want := range []string{
+		`weft_microvm_agent_firewall_status_publishes_total{result="ok"} 2`,
+		`weft_microvm_agent_firewall_status_publishes_total{result="error"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics body missing %q\n--- full body :\n%s", want, body)
+		}
+	}
 }
 
 // scrape exercises the /metrics handler in-process and returns the
