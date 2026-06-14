@@ -7,6 +7,8 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-14
+
 ### Fixed
 
 - **Shutdown leaks** : the SIGTERM handler now closes the embedded
