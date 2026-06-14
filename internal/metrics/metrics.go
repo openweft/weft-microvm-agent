@@ -1,14 +1,19 @@
 // Package metrics owns the Prometheus instrumentation for the
 // in-guest weft-microvm-agent. The daemon registers a small surface :
 //
-//   - weft_microvm_agent_build_info{version,commit,date}      — boot fingerprint
-//   - weft_microvm_agent_apply_total{concern,result}          — Apply call counter
-//   - weft_microvm_agent_apply_duration_seconds{concern}      — Apply latency histogram
-//   - weft_microvm_agent_nats_connected                       — 0/1 gauge
+//   - weft_microvm_agent_build_info{version,commit,date}            — boot fingerprint
+//   - weft_microvm_agent_apply_total{concern,result}                — Apply call counter
+//   - weft_microvm_agent_apply_duration_seconds{concern}            — Apply latency histogram
+//   - weft_microvm_agent_nats_connected                             — 0/1 gauge
+//   - weft_microvm_agent_firewall_status_publishes_total{result}    — firewallstatus.Emitter publishOnce counter
 //
 // Each NATS-driven subscriber (mesh / mounts / sshkeys / properties /
 // boot) calls Recorder.RecordApply after running its ApplyFunc ; the
 // concern label routes the observation to the right time-series.
+// The firewallstatus emitter wires Recorder.RecordFirewallStatusPublish
+// via its PublishHook seam — parallel to RecordApply but specific to
+// the publish-loop reverse direction.
+//
 // Mirrors the shape of openweft/weft-network's internal/metrics
 // package — same Registry-not-Default policy, same Handler() wiring.
 package metrics
@@ -31,10 +36,11 @@ import (
 type Recorder struct {
 	reg *prometheus.Registry
 
-	buildInfo      *prometheus.GaugeVec
-	applyTotal     *prometheus.CounterVec
-	applyDuration  *prometheus.HistogramVec
-	natsConnected  prometheus.Gauge
+	buildInfo               *prometheus.GaugeVec
+	applyTotal              *prometheus.CounterVec
+	applyDuration           *prometheus.HistogramVec
+	natsConnected           prometheus.Gauge
+	firewallStatusPublishes *prometheus.CounterVec
 }
 
 // New builds + registers the recorder against a fresh registry.
@@ -60,8 +66,12 @@ func New(version, commit, date string) *Recorder {
 			Name: "weft_microvm_agent_nats_connected",
 			Help: "1 if the agent currently holds a NATS connection ; 0 otherwise. Flipped by the subscriber lifecycle.",
 		}),
+		firewallStatusPublishes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "weft_microvm_agent_firewall_status_publishes_total",
+			Help: "Total FirewallStatus publishOnce invocations from the in-guest firewallstatus emitter, labelled by result (ok|error). Parallel to apply_total but specific to the reverse-direction publish loop.",
+		}, []string{"result"}),
 	}
-	r.reg.MustRegister(r.buildInfo, r.applyTotal, r.applyDuration, r.natsConnected)
+	r.reg.MustRegister(r.buildInfo, r.applyTotal, r.applyDuration, r.natsConnected, r.firewallStatusPublishes)
 	r.buildInfo.WithLabelValues(version, commit, date).Set(1)
 	return r
 }
@@ -85,6 +95,30 @@ func (r *Recorder) RecordApply(concern string, err error, dur time.Duration) {
 	}
 	r.applyTotal.WithLabelValues(concern, result).Inc()
 	r.applyDuration.WithLabelValues(concern).Observe(dur.Seconds())
+}
+
+// RecordFirewallStatusPublish records one Emitter.publishOnce
+// invocation in the firewallstatus loop : increments the counter
+// labelled ok / error from err. Parallel to RecordApply (same ok /
+// error convention) but separate metric because publish-loop and
+// apply-loop have different operator narratives (the apply
+// histogram only makes sense for the reconcile side).
+//
+// Wired from cmd/weft-microvm-agent's startFirewallStatus via
+// firewallstatus.Emitter.SetMetricsHook so the hook receives every
+// publish outcome — happy path or transient transport hiccup.
+//
+// Nil-receiver-safe like RecordApply / SetNATSConnected so tests
+// that don't construct a Recorder still tick along.
+func (r *Recorder) RecordFirewallStatusPublish(err error) {
+	if r == nil {
+		return
+	}
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	r.firewallStatusPublishes.WithLabelValues(result).Inc()
 }
 
 // SetNATSConnected flips the gauge. Call once from the NATS

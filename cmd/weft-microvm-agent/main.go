@@ -503,6 +503,7 @@ func startFirewallStatus(url, creds, vmID string, every time.Duration, rec *metr
 		rec.SetNATSConnected(false)
 		return nil, nil, err
 	}
+	em.SetMetricsHook(rec.RecordFirewallStatusPublish)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		if err := em.Run(ctx); err != nil && err != context.Canceled {
