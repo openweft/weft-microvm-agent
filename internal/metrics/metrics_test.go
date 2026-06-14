@@ -84,6 +84,103 @@ func TestNilReceiverNoPanic(t *testing.T) {
 	r.RecordApply("mesh", nil, time.Millisecond)
 	r.SetNATSConnected(true)
 	r.RecordFirewallStatusPublish(nil)
+	r.RecordFirewallDrops(42, 4096)
+}
+
+func TestRecordFirewallDrops_MonotonicGrowth(t *testing.T) {
+	// Happy path : kernel counter grows monotonically across ticks.
+	// Published counter == last observed value (sum of deltas == last).
+	r := New("dev", "none", "unknown")
+	r.RecordFirewallDrops(0, 0)
+	r.RecordFirewallDrops(10, 1024)
+	r.RecordFirewallDrops(100, 10240)
+
+	body := scrape(t, r)
+	for _, want := range []string{
+		"weft_microvm_agent_firewall_drops_packets_total 100",
+		"weft_microvm_agent_firewall_drops_bytes_total 10240",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics body missing %q\n--- full body :\n%s", want, body)
+		}
+	}
+}
+
+func TestRecordFirewallDrops_ResetOnKernelRebuild(t *testing.T) {
+	// Kernel rebuilds its table (flush + reapply) ; the new counter
+	// starts at 0 and grows from there. The Prometheus counter must
+	// stay monotonic — accumulate past_total + post_reset_total.
+	//
+	// Sequence : 100 → 50 → 150.
+	// Expected published : 100 (first), 100+50=150 (after reset),
+	// 100+150=250 (continuing growth from the rebuilt counter).
+	r := New("dev", "none", "unknown")
+	r.RecordFirewallDrops(100, 1000)
+	r.RecordFirewallDrops(50, 500) // kernel reset detected (50 < 100)
+	r.RecordFirewallDrops(150, 1500)
+
+	body := scrape(t, r)
+	for _, want := range []string{
+		"weft_microvm_agent_firewall_drops_packets_total 250",
+		"weft_microvm_agent_firewall_drops_bytes_total 2500",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics body missing %q\n--- full body :\n%s", want, body)
+		}
+	}
+}
+
+func TestRecordFirewallDrops_ResetCaseFromTaskBrief(t *testing.T) {
+	// Exact sequence from the task brief : 100 then 50.
+	// Expected : 100 + 50 = 150, not 50.
+	r := New("dev", "none", "unknown")
+	r.RecordFirewallDrops(100, 100)
+	r.RecordFirewallDrops(50, 50)
+
+	body := scrape(t, r)
+	for _, want := range []string{
+		"weft_microvm_agent_firewall_drops_packets_total 150",
+		"weft_microvm_agent_firewall_drops_bytes_total 150",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics body missing %q\n--- full body :\n%s", want, body)
+		}
+	}
+}
+
+func TestRecordFirewallDrops_FirstCallSeedsFromZero(t *testing.T) {
+	// First-ever observation of a non-zero value : the recorder starts
+	// with last=0, so the first call publishes the full value.
+	r := New("dev", "none", "unknown")
+	r.RecordFirewallDrops(42, 4096)
+
+	body := scrape(t, r)
+	for _, want := range []string{
+		"weft_microvm_agent_firewall_drops_packets_total 42",
+		"weft_microvm_agent_firewall_drops_bytes_total 4096",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics body missing %q\n--- full body :\n%s", want, body)
+		}
+	}
+}
+
+func TestRecordFirewallDrops_FlatTickIsNoop(t *testing.T) {
+	// Same value observed twice in a row : no drops happened, counter
+	// must not advance.
+	r := New("dev", "none", "unknown")
+	r.RecordFirewallDrops(10, 100)
+	r.RecordFirewallDrops(10, 100)
+
+	body := scrape(t, r)
+	for _, want := range []string{
+		"weft_microvm_agent_firewall_drops_packets_total 10",
+		"weft_microvm_agent_firewall_drops_bytes_total 100",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics body missing %q\n--- full body :\n%s", want, body)
+		}
+	}
 }
 
 func TestRecordFirewallStatusPublish_OkAndError(t *testing.T) {

@@ -504,6 +504,7 @@ func startFirewallStatus(url, creds, vmID string, every time.Duration, rec *metr
 		return nil, nil, err
 	}
 	em.SetMetricsHook(rec.RecordFirewallStatusPublish)
+	em.SetReadHook(rec.RecordFirewallDrops)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		if err := em.Run(ctx); err != nil && err != context.Canceled {

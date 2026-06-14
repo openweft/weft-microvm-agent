@@ -148,6 +148,82 @@ func TestSetMetricsHook_FiresOnEveryPublish(t *testing.T) {
 	cancel()
 }
 
+func TestSetReadHook_FiresWithDropCountersFromRead(t *testing.T) {
+	srv, url := startNATS(t)
+	defer srv.Shutdown()
+
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer nc.Close()
+
+	// ReadFunc returns increasing drop counters across calls so the
+	// hook captures distinct (packets, bytes) pairs.
+	var mu sync.Mutex
+	var calls int
+	read := func() pod.FirewallStatus {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return pod.FirewallStatus{
+			Overall:      "Healthy",
+			DropsPackets: uint64(calls * 10),
+			DropsBytes:   uint64(calls * 1024),
+		}
+	}
+
+	em, err := New(nc, "vm-readhook", read, 30*time.Millisecond, silentLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	type sample struct{ pkts, byts uint64 }
+	samples := make(chan sample, 8)
+	em.SetReadHook(func(p, b uint64) {
+		select {
+		case samples <- sample{p, b}:
+		default:
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go em.Run(ctx)
+
+	// First read = 10 / 1024 ; second tick = 20 / 2048.
+	for i, want := range []sample{{10, 1024}, {20, 2048}} {
+		select {
+		case got := <-samples:
+			if got != want {
+				t.Errorf("readhook[%d] = %+v, want %+v", i, got, want)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("readhook[%d]: timed out waiting", i)
+		}
+	}
+	cancel()
+}
+
+func TestSetReadHook_NilIsSafe(t *testing.T) {
+	// publishOnce without a ReadHook must not panic. Default Emitter
+	// leaves readHook nil ; the publish loop has to gate on it.
+	srv, url := startNATS(t)
+	defer srv.Shutdown()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer nc.Close()
+
+	em, err := New(nc, "vm-nilread", okRead, time.Hour, silentLog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_ = em.Run(ctx) // no panic = pass
+}
+
 func TestSetMetricsHook_NilHookIsSafe(t *testing.T) {
 	// Default Emitter has no hook ; publishOnce must not panic. We
 	// exercise it directly (bypassing Run's ticker) by leaving the
