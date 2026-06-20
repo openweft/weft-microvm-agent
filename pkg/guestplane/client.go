@@ -35,6 +35,35 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// Dispatcher is the action layer behind dispatchControl : a ControlRequest
+// frame arrives over the AF_VSOCK GuestPodPlane, the wire layer (this
+// file) ACKs it, and routes it through these callbacks so the in-guest
+// reconcilers (pkg/containers, pkg/execsession) actually do the work.
+//
+// All fields are optional. A nil callback resolves to the legacy
+// "not yet routed" Error so the host's operator sees a clear signal
+// the dispatch slot hasn't been wired locally — preserving the
+// dispatchControl-as-stub behaviour for callers that don't pass one.
+//
+// Each callback returns the *string the host should surface as the
+// ControlResponse.Error : empty / "" = success. Errors are stringified
+// by the caller, not the dispatcher, so the wire shape stays simple.
+type Dispatcher struct {
+	// StopPod is invoked on a ControlRequest_StopPod. graceSeconds is
+	// the StopPod.GraceSeconds value (0 = caller-chosen default).
+	StopPod func(ctx context.Context, graceSeconds uint32) error
+	// Kill is invoked on a ControlRequest_Kill. signal defaults to
+	// "SIGTERM" when empty.
+	Kill func(ctx context.Context, containerID, signal string) error
+	// Exec is invoked on a ControlRequest_Exec. The dispatcher
+	// receives the proto value verbatim so it can decide whether to
+	// open a pty (tty=true) or a one-shot exec.
+	Exec func(ctx context.Context, e *guestv1.ExecInContainer) error
+	// Update is invoked on a ControlRequest_Update. UpdateContainer
+	// carries the new command + merged env for one container.
+	Update func(ctx context.Context, u *guestv1.UpdateContainer) error
+}
+
 // Default port the host-side weft-agent binds its AF_VSOCK
 // listener on. Operators can override via the agent flag ; the
 // guest side has to agree, so this constant is the wire contract.
@@ -86,6 +115,12 @@ type Config struct {
 	DialDelay time.Duration
 
 	Logger *log.Logger
+
+	// Dispatcher routes incoming ControlRequest frames into the
+	// in-guest reconcilers. nil = the legacy "not yet routed" stub
+	// reply is returned to the host (every ACK still carries the
+	// matching CallId so the host's correlator doesn't stall).
+	Dispatcher *Dispatcher
 }
 
 // Run is the daemon body : dial, Hello/HelloAck handshake, then a
@@ -248,7 +283,7 @@ func runOnce(ctx context.Context, cfg Config) error {
 				return
 			}
 			if cr := frame.GetControlReq(); cr != nil {
-				resp := dispatchControl(cr, cfg.Logger)
+				resp := dispatchControl(ctx, cr, cfg.Dispatcher, cfg.Logger)
 				if err := stream.Send(&guestv1.GuestFrame{
 					Body: &guestv1.GuestFrame_ControlResp{ControlResp: resp},
 				}); err != nil {
@@ -269,18 +304,70 @@ func runOnce(ctx context.Context, cfg Config) error {
 }
 
 // dispatchControl ACKs every incoming ControlRequest with a
-// matching CallId. The actual in-guest action (stop / kill / exec /
-// update) is still wired through the existing NATS-based subscribers
-// (containers.NewSubscriber, execsession.NewSubscriber) ; this just
-// keeps the host's dispatcher happy so the request doesn't hang.
+// matching CallId, routing the action through dp when set. nil dp
+// preserves the legacy "not yet routed to in-guest reconciler" Error
+// — the host's correlator still gets a response on the wire, so the
+// stream never stalls.
 //
-// Returning a populated Error field is the documented "not yet
-// implemented" path — the host surfaces it to the operator without
-// dropping the connection.
-func dispatchControl(cr *guestv1.ControlRequest, logger *log.Logger) *guestv1.ControlResponse {
+// Per-variant routing :
+//
+//	StopPod  → dp.StopPod(ctx, graceSeconds)
+//	Kill     → dp.Kill(ctx, containerID, signal)  (signal defaults to "SIGTERM")
+//	Exec     → dp.Exec(ctx, *guestv1.ExecInContainer)
+//	Update   → dp.Update(ctx, *guestv1.UpdateContainer)
+//
+// A nil callback in dp falls back to the same "not wired" Error as a
+// nil dp — so the agent can opt into a subset of variants without a
+// custom dispatch shape.
+func dispatchControl(ctx context.Context, cr *guestv1.ControlRequest, dp *Dispatcher, logger *log.Logger) *guestv1.ControlResponse {
 	logger.Printf("guestplane: control req call_id=%d op=%T", cr.GetCallId(), cr.GetOp())
-	return &guestv1.ControlResponse{
-		CallId: cr.GetCallId(),
-		Error:  "guestplane: control dispatch not yet routed to in-guest reconciler",
+	resp := &guestv1.ControlResponse{CallId: cr.GetCallId()}
+	const unwired = "guestplane: control dispatch not yet routed to in-guest reconciler"
+
+	if dp == nil {
+		resp.Error = unwired
+		return resp
 	}
+
+	var err error
+	switch op := cr.GetOp().(type) {
+	case *guestv1.ControlRequest_StopPod:
+		if dp.StopPod == nil {
+			resp.Error = unwired
+			return resp
+		}
+		err = dp.StopPod(ctx, op.StopPod.GetGraceSeconds())
+	case *guestv1.ControlRequest_Kill:
+		if dp.Kill == nil {
+			resp.Error = unwired
+			return resp
+		}
+		sig := op.Kill.GetSignal()
+		if sig == "" {
+			sig = "SIGTERM"
+		}
+		err = dp.Kill(ctx, op.Kill.GetContainerId(), sig)
+	case *guestv1.ControlRequest_Exec:
+		if dp.Exec == nil {
+			resp.Error = unwired
+			return resp
+		}
+		err = dp.Exec(ctx, op.Exec)
+	case *guestv1.ControlRequest_Update:
+		if dp.Update == nil {
+			resp.Error = unwired
+			return resp
+		}
+		err = dp.Update(ctx, op.Update)
+	default:
+		// Empty op or an unknown variant — ack with an Error so the
+		// host's dispatcher surfaces the gap rather than blocking.
+		resp.Error = fmt.Sprintf("guestplane: unknown ControlRequest op %T", op)
+		return resp
+	}
+
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	return resp
 }
