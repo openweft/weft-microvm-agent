@@ -25,6 +25,7 @@ import (
 	"github.com/openweft/weft-microvm-agent/internal/metrics"
 	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
 	execsession "github.com/openweft/weft-microvm-agent/pkg/execsession"
+	"github.com/openweft/weft-microvm-agent/pkg/guestplane"
 	"github.com/openweft/weft-microvm-init/pkg/cubefs"
 	agentfirewall "github.com/openweft/weft-microvm-agent/pkg/firewall"
 	agentfirewallstatus "github.com/openweft/weft-microvm-agent/pkg/firewallstatus"
@@ -78,6 +79,15 @@ type opts struct {
 	natsURL               string
 	natsCreds             string
 	metricsAddr           string
+	// guestPlanePodID is announced via GuestHello when dialing the
+	// host's AF_VSOCK GuestPodPlane. Empty disables the client —
+	// keeps unit-test boots quiet and lets non-microVM use of this
+	// binary (lab benches, dev iteration on x86 hosts) skip the
+	// dial loop entirely.
+	guestPlanePodID    string
+	guestPlanePort     uint32
+	guestPlaneHostCID  uint32
+	guestPlaneInterval time.Duration
 }
 
 func main() {
@@ -126,6 +136,13 @@ insecure credentials.`,
 	// finds both daemons sharing a lo (e.g. an agent VM with a
 	// co-located network shim) doesn't see a port collision.
 	f.StringVar(&o.metricsAddr, "metrics-addr", ":9101", "Prometheus /metrics + /healthz listen address ; empty disables. tcp:host:port shape.")
+	// GuestPodPlane (AF_VSOCK) client. Empty pod-id disables the
+	// dial loop ; weft-init's cmdline parser sets the env weft.vm-name
+	// which the operator wires to this flag via systemd ExecStart.
+	f.StringVar(&o.guestPlanePodID, "guestplane-pod-id", "", "pod_id to announce on the AF_VSOCK GuestPodPlane bidi stream ; empty disables the client")
+	f.Uint32Var(&o.guestPlanePort, "guestplane-port", guestplane.DefaultPort, "AF_VSOCK port the host's GuestPodPlane listens on")
+	f.Uint32Var(&o.guestPlaneHostCID, "guestplane-host-cid", 2, "AF_VSOCK CID to dial ; production = 2 (CID_HOST)")
+	f.DurationVar(&o.guestPlaneInterval, "guestplane-heartbeat", guestplane.DefaultHeartbeatTick, "how often a PodStatus heartbeat is emitted ; <=0 disables heartbeats (handshake still runs)")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
@@ -267,6 +284,30 @@ func run(o opts) error {
 	// plenty for an idle scrape connection to drain.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// GuestPodPlane (AF_VSOCK) client. Dials the host's GuestPodPlane
+	// on CID_HOST (= 2) and stays connected, emitting PodStatus
+	// heartbeats and acknowledging ControlRequest frames. Disabled
+	// when no pod-id is given so a lab boot of this binary outside a
+	// microVM doesn't spin a reconnect loop against nothing.
+	if o.guestPlanePodID != "" {
+		cfg := guestplane.Config{
+			HostCID:       o.guestPlaneHostCID,
+			Port:          o.guestPlanePort,
+			PodID:         o.guestPlanePodID,
+			InitVersion:   version,
+			KernelInfo:    kernelRelease(),
+			HeartbeatTick: o.guestPlaneInterval,
+			Logger:        logger,
+		}
+		go func() {
+			if err := guestplane.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Printf("weft-microvm-agent: guestplane terminated : %v", err)
+			}
+		}()
+		logger.Printf("weft-microvm-agent: guestplane client started pod=%s vsock=%d:%d",
+			o.guestPlanePodID, o.guestPlaneHostCID, o.guestPlanePort)
+	}
 
 	// First-boot provisioning: watch the property tree for weft.boot/* to
 	// appear, then run the configured payload + script exactly once
