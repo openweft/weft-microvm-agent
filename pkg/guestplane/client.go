@@ -203,13 +203,20 @@ func runOnce(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("Attach: %w", err)
 	}
 
-	// Send the mandatory Hello first.
+	// Send the mandatory Hello first. ReportedCid is read from the
+	// local kernel via ioctl — the host cross-checks it against
+	// peer.CID() to detect spoofing AND uses it as the canonical
+	// CID when the host's allocator didn't pre-set one (Apple VZ
+	// path, see weft-driver-vz CHANGELOG audit). Zero means "not
+	// reported" ; the host falls back to peer.CID() alone.
+	reportedCID := transport.LocalCID()
 	if err := stream.Send(&guestv1.GuestFrame{
 		Body: &guestv1.GuestFrame_Hello{
 			Hello: &guestv1.GuestHello{
 				PodId:       cfg.PodID,
 				InitVersion: cfg.InitVersion,
 				Kernel:      cfg.KernelInfo,
+				ReportedCid: reportedCID,
 			},
 		},
 	}); err != nil {

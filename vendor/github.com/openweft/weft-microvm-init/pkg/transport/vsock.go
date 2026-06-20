@@ -90,3 +90,39 @@ func DialWithRetry(cid, port uint32, attempts int, delay time.Duration) (net.Con
 	}
 	return nil, lastErr
 }
+
+// ioctlVMSocketsGetLocalCID is IOCTL_VM_SOCKETS_GET_LOCAL_CID from
+// linux/vm_sockets.h. Value is arch-dependent ; 0x7b9 holds on arm64
+// / amd64 / x86 (the kernel headers use the same _IO(7, 0xb9)
+// constant). Hard-coded here to avoid pulling cgo headers into a
+// pure-Go init binary.
+const ioctlVMSocketsGetLocalCID = 0x7b9
+
+// LocalCID reads the calling process's AF_VSOCK guest CID from the
+// kernel via ioctl on /dev/vsock. Used by weft-microvm-agent to
+// announce its actual CID in the GuestPodPlane Hello frame so the
+// host can populate its podCIDs registry — closes the Apple-VZ
+// readback gap (the host can't query Apple's framework for the
+// assigned CID, but the guest's own kernel knows it).
+//
+// Returns 0 on any error (missing /dev/vsock, ioctl failure) so
+// non-microVM builds + older guests don't crash : the host treats
+// a zero report as "not provided" and falls back to the v0.4.46
+// strict-when-known check against peer.CID().
+func LocalCID() uint32 {
+	fd, err := syscall.Open("/dev/vsock", syscall.O_RDONLY, 0)
+	if err != nil {
+		return 0
+	}
+	defer syscall.Close(fd)
+	var cid uint32
+	if _, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(fd),
+		uintptr(ioctlVMSocketsGetLocalCID),
+		uintptr(unsafe.Pointer(&cid)),
+	); errno != 0 {
+		return 0
+	}
+	return cid
+}
