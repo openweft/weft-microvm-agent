@@ -13,7 +13,20 @@ import (
 	"errors"
 	"log"
 	"time"
+
+	guestv1 "github.com/openweft/weft-proto/guestv1"
 )
+
+// Dispatcher mirrors the Linux build's type so non-Linux callers
+// (developer machines, IDEs) can still compile main() against the
+// dispatch wire shape. The Run stub below never invokes any of
+// these callbacks.
+type Dispatcher struct {
+	StopPod func(ctx context.Context, graceSeconds uint32) error
+	Kill    func(ctx context.Context, containerID, signal string) error
+	Exec    func(ctx context.Context, e *guestv1.ExecInContainer) error
+	Update  func(ctx context.Context, u *guestv1.UpdateContainer) error
+}
 
 const DefaultPort uint32 = 7777
 
@@ -35,6 +48,7 @@ type Config struct {
 	DialAttempts  int
 	DialDelay     time.Duration
 	Logger        *log.Logger
+	Dispatcher    *Dispatcher
 }
 
 // Run on non-Linux returns immediately with an error. The agent

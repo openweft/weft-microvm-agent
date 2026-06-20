@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -24,6 +25,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/openweft/weft-microvm-agent/internal/metrics"
 	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
+	agentcontainers "github.com/openweft/weft-microvm-agent/pkg/containers"
 	execsession "github.com/openweft/weft-microvm-agent/pkg/execsession"
 	"github.com/openweft/weft-microvm-agent/pkg/guestplane"
 	"github.com/openweft/weft-microvm-init/pkg/cubefs"
@@ -37,6 +39,7 @@ import (
 	agentsshkeys "github.com/openweft/weft-microvm-agent/pkg/sshkeys"
 	"github.com/openweft/weft-microvm-init/pkg/pod"
 	introspectv1 "github.com/openweft/weft-proto/introspectv1"
+	guestv1 "github.com/openweft/weft-proto/guestv1"
 	weftslognats "github.com/openweft/weft-slognats"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -291,6 +294,22 @@ func run(o opts) error {
 	// when no pod-id is given so a lab boot of this binary outside a
 	// microVM doesn't spin a reconnect loop against nothing.
 	if o.guestPlanePodID != "" {
+		// Dispatcher : route incoming ControlRequest frames to the
+		// existing NATS-driven reconcilers. We open a dedicated NATS
+		// connection here so the dispatcher's fate is independent of
+		// the other subscribers' connections (any of which may not be
+		// active depending on flags). When --nats-url isn't reachable
+		// the dispatch slot stays nil and the agent falls back to the
+		// "not yet routed" stub Error — the wire layer still ACKs.
+		var dispatcher *guestplane.Dispatcher
+		if dnc, err := nats.Connect(o.natsURL, natsOptions(o.natsCreds)...); err == nil {
+			dispatcher = newGuestplaneDispatcher(dnc, o.guestPlanePodID, logger)
+			natsConns = append(natsConns, dnc)
+			logger.Printf("weft-microvm-agent: guestplane dispatcher wired to NATS at %s", o.natsURL)
+		} else {
+			logger.Printf("weft-microvm-agent: guestplane dispatcher disabled : NATS connect %s : %v", o.natsURL, err)
+		}
+
 		cfg := guestplane.Config{
 			HostCID:       o.guestPlaneHostCID,
 			Port:          o.guestPlanePort,
@@ -299,6 +318,7 @@ func run(o opts) error {
 			KernelInfo:    kernelRelease(),
 			HeartbeatTick: o.guestPlaneInterval,
 			Logger:        logger,
+			Dispatcher:    dispatcher,
 		}
 		go func() {
 			if err := guestplane.Run(ctx, cfg); err != nil && !errors.Is(err, context.Canceled) {
@@ -743,6 +763,120 @@ func watchAndRunBoot(shutdownCtx context.Context, propsDir string, runner *agent
 			return
 		case <-time.After(pollEvery):
 		}
+	}
+}
+
+// natsOptions builds the per-conn options applied to every NATS dial
+// inside the agent. Credentials are optional ; an empty path means
+// the bus is configured without explicit auth (dev / lab setups).
+func natsOptions(creds string) []nats.Option {
+	var opts []nats.Option
+	if creds != "" {
+		opts = append(opts, nats.UserCredentials(creds))
+	}
+	return opts
+}
+
+// newGuestplaneDispatcher builds the Dispatcher the GuestPodPlane
+// wire layer consults for every incoming ControlRequest frame. Each
+// callback translates the proto into a publish on the existing
+// NATS-driven subject so the in-guest reconcilers (pkg/containers,
+// pkg/execsession) — and any other subscriber — see the action.
+//
+// Wire contract (the host MUST agree on these subjects) :
+//
+//   weft.containers.<vmID>          desired ContainerSet (JSON)
+//                                   StopPod  = empty set
+//                                   Update   = single-container set
+//   weft.containers.<vmID>.kill     KillContainer JSON {container_id,signal}
+//                                   (new subject ; no in-guest subscriber
+//                                    today — gap documented in main.go's
+//                                    containersVMID block)
+//   weft.exec.<vmID>.open           execsession.ExecRequest JSON
+//                                   (consumed by pkg/execsession.Subscriber)
+//
+// Logger is shared with the rest of the agent so a dispatch trace
+// reads in the same /var/log/weft-microvm-agent.log timeline as the
+// guestplane: heartbeat lines.
+func newGuestplaneDispatcher(nc *nats.Conn, vmID string, logger *log.Logger) *guestplane.Dispatcher {
+	return &guestplane.Dispatcher{
+		StopPod: func(_ context.Context, graceSeconds uint32) error {
+			// An empty ContainerSet tells the per-VM reconciler to
+			// stop every container — same convergence the agent
+			// already runs when the loom-server publishes "no work".
+			payload, err := json.Marshal(pod.ContainerSet{Version: pod.ContainerSetVersion, Containers: nil})
+			if err != nil {
+				return fmt.Errorf("guestplane stop-pod marshal: %w", err)
+			}
+			subj := agentcontainers.Subject(vmID)
+			logger.Printf("guestplane dispatcher: stop-pod (grace=%ds) -> %s", graceSeconds, subj)
+			return nc.Publish(subj, payload)
+		},
+		Kill: func(_ context.Context, containerID, signal string) error {
+			// New subject : weft.containers.<vmID>.kill. No in-guest
+			// subscriber consumes it yet — kept on the bus so any
+			// future Kill handler (loom-doctor, a per-container
+			// supervisor) gets the event without the agent having to
+			// reach into crun directly. Documented gap.
+			payload, err := json.Marshal(struct {
+				ContainerID string `json:"container_id"`
+				Signal      string `json:"signal"`
+			}{ContainerID: containerID, Signal: signal})
+			if err != nil {
+				return fmt.Errorf("guestplane kill marshal: %w", err)
+			}
+			subj := agentcontainers.Subject(vmID) + ".kill"
+			logger.Printf("guestplane dispatcher: kill container=%q signal=%s -> %s", containerID, signal, subj)
+			return nc.Publish(subj, payload)
+		},
+		Exec: func(_ context.Context, e *guestv1.ExecInContainer) error {
+			// Mirror the ExecRequest the loom-server publishes on the
+			// same subject. We mint an ID so the execsession subscriber
+			// has a stable session handle ; the host-side response
+			// stream is the host's GuestPodPlane reply path, separate
+			// from the NATS in/out subjects the loom-server uses.
+			req := execsession.ExecRequest{
+				ID: fmt.Sprintf("gplane-%d", time.Now().UnixNano()),
+				Target: execsession.ExecTarget{
+					Kind:      "exec",
+					Container: e.GetContainerId(),
+					Command:   e.GetCommand(),
+					Env:       e.GetEnv(),
+				},
+			}
+			payload, err := json.Marshal(req)
+			if err != nil {
+				return fmt.Errorf("guestplane exec marshal: %w", err)
+			}
+			subj := execsession.SubjectOpen(vmID)
+			logger.Printf("guestplane dispatcher: exec container=%q -> %s", e.GetContainerId(), subj)
+			return nc.Publish(subj, payload)
+		},
+		Update: func(_ context.Context, u *guestv1.UpdateContainer) error {
+			// UpdateContainer's proto is intentionally minimal (env +
+			// command). Bridge into the ContainerSet contract by
+			// publishing a single-container set keyed by the
+			// container_id ; the reconciler's replace-by-name logic
+			// will Stop + Start the named container with the new
+			// command. Image stays unset — the legacy in-guest
+			// reconciler is removed today, so this is a forward-compat
+			// publish for any future subscriber.
+			set := pod.ContainerSet{
+				Version: pod.ContainerSetVersion,
+				Containers: []pod.WorkloadContainer{{
+					Name:    u.GetContainerId(),
+					Command: u.GetCommand(),
+					Env:     u.GetEnv(),
+				}},
+			}
+			payload, err := json.Marshal(set)
+			if err != nil {
+				return fmt.Errorf("guestplane update marshal: %w", err)
+			}
+			subj := agentcontainers.Subject(vmID)
+			logger.Printf("guestplane dispatcher: update container=%q -> %s", u.GetContainerId(), subj)
+			return nc.Publish(subj, payload)
+		},
 	}
 }
 
