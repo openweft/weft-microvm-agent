@@ -245,8 +245,10 @@ github.com/opencontainers/image-spec/specs-go/v1
 github.com/openweft/weft-microvm-init/pkg/cubefs
 github.com/openweft/weft-microvm-init/pkg/network
 github.com/openweft/weft-microvm-init/pkg/pod
+github.com/openweft/weft-microvm-init/pkg/transport
 # github.com/openweft/weft-proto v0.14.0 => ../weft-proto
 ## explicit; go 1.25.0
+github.com/openweft/weft-proto/guestv1
 github.com/openweft/weft-proto/introspectv1
 # github.com/openweft/weft-slognats v0.3.0
 ## explicit; go 1.26
