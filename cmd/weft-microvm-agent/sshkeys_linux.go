@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/openweft/weft-microvm-agent/internal/atomicfile"
 	"github.com/openweft/weft-microvm-agent/pkg/sshkeys"
 )
 
@@ -43,16 +44,8 @@ func sshKeysApplyer(authorizedKeysPath string, uid, gid int) sshkeys.ApplyFunc {
 			buf.WriteByte('\n')
 		}
 
-		tmp := authorizedKeysPath + ".tmp"
-		if err := os.WriteFile(tmp, []byte(buf.String()), 0o600); err != nil {
-			return fmt.Errorf("write tmp %s: %w", tmp, err)
-		}
-		if uid >= 0 && gid >= 0 {
-			_ = os.Chown(tmp, uid, gid)
-		}
-		if err := os.Rename(tmp, authorizedKeysPath); err != nil {
-			_ = os.Remove(tmp)
-			return fmt.Errorf("rename %s -> %s: %w", tmp, authorizedKeysPath, err)
+		if err := atomicfile.Write(authorizedKeysPath, []byte(buf.String()), 0o600, atomicfile.WithOwner(uid, gid)); err != nil {
+			return fmt.Errorf("write authorized_keys %s: %w", authorizedKeysPath, err)
 		}
 		return nil
 	}
