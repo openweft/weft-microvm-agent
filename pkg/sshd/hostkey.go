@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/openweft/weft-microvm-agent/internal/atomicfile"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -51,12 +52,7 @@ func LoadOrCreateHostKey(path string) (ssh.Signer, error) {
 		return nil, fmt.Errorf("marshal ed25519: %w", err)
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: blob})
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, pemBytes, 0o600); err != nil {
-		return nil, fmt.Errorf("write tmp %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := atomicfile.Write(path, pemBytes, 0o600); err != nil {
 		return nil, fmt.Errorf("commit %s: %w", path, err)
 	}
 	return parseHostKey(pemBytes)

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/openweft/weft-microvm-agent/internal/atomicfile"
 	"github.com/openweft/weft-microvm-agent/pkg/properties"
 )
 
@@ -67,13 +68,8 @@ func propertiesApplyer(root string) properties.ApplyFunc {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return fmt.Errorf("mkdir parent of %s: %w", path, err)
 			}
-			tmp := path + ".tmp"
-			if err := os.WriteFile(tmp, []byte(ps.Properties[k]), 0o644); err != nil {
-				return fmt.Errorf("write tmp %s: %w", tmp, err)
-			}
-			if err := os.Rename(tmp, path); err != nil {
-				_ = os.Remove(tmp)
-				return fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
+			if err := atomicfile.Write(path, []byte(ps.Properties[k]), 0o644); err != nil {
+				return fmt.Errorf("write property %s: %w", path, err)
 			}
 		}
 
