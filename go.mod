@@ -1,6 +1,6 @@
 module github.com/openweft/weft-microvm-agent
 
-go 1.26
+go 1.26.4
 
 require (
 	github.com/creack/pty v1.1.24
