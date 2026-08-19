@@ -1,0 +1,87 @@
+name: CI
+
+# This repository had no CI at all, which is how a go.mod pinning
+# weft-proto v0.14.0 -- against code that needs GuestHello.reported_cid from
+# v0.16.0 -- went unnoticed: two committed `replace => ../sibling` directives
+# pointed at newer working copies, so it built on a developer's machine and
+# nowhere else.
+#
+# The cross-build matrix is what would have caught it. linux is listed first
+# because it is this agent's actual target, and it was the ONLY pair that
+# failed: darwin, the *BSDs and windows all built fine while linux/amd64 and
+# linux/arm64 did not.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race -count=1 ./...
+
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, freebsd, openbsd, netbsd, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: go build ./...
+
+  vendor-consistent:
+    # The tree is vendored, so go.mod and vendor/ must not drift apart: a
+    # stale vendor/modules.txt makes every other lane build something other
+    # than what go.mod says.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go mod vendor leaves no diff
+        run: |
+          go mod vendor
+          git diff --exit-code -- go.mod go.sum vendor/ || {
+            echo "::error::vendor/ is out of sync with go.mod; run 'go mod vendor' and commit"
+            exit 1
+          }
+      - name: builds with no network
+        env:
+          GOFLAGS: -mod=vendor
+          GOPROXY: off
+        run: go build ./...

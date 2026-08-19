@@ -240,14 +240,14 @@ github.com/opencontainers/go-digest
 ## explicit; go 1.18
 github.com/opencontainers/image-spec/specs-go
 github.com/opencontainers/image-spec/specs-go/v1
-# github.com/openweft/weft-microvm-init v0.2.2 => ../weft-microvm-init
+# github.com/openweft/weft-microvm-init v0.2.4
 ## explicit; go 1.25.1
 github.com/openweft/weft-microvm-init/pkg/cubefs
 github.com/openweft/weft-microvm-init/pkg/network
 github.com/openweft/weft-microvm-init/pkg/pod
 github.com/openweft/weft-microvm-init/pkg/transport
-# github.com/openweft/weft-proto v0.14.0 => ../weft-proto
-## explicit; go 1.25.0
+# github.com/openweft/weft-proto v0.22.0
+## explicit; go 1.26.4
 github.com/openweft/weft-proto/guestv1
 github.com/openweft/weft-proto/introspectv1
 # github.com/openweft/weft-slognats v0.3.0
@@ -593,5 +593,3 @@ oras.land/oras-go/v2/registry/remote/auth
 oras.land/oras-go/v2/registry/remote/errcode
 oras.land/oras-go/v2/registry/remote/internal/errutil
 oras.land/oras-go/v2/registry/remote/retry
-# github.com/openweft/weft-microvm-init => ../weft-microvm-init
-# github.com/openweft/weft-proto => ../weft-proto

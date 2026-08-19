@@ -108,6 +108,10 @@ github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8
 github.com/opencontainers/go-digest v1.0.0/go.mod h1:0JzlMkj0TRzQZfJkVvzbP0HBR3IKzErnv2BNG4W4MAM=
 github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJwooC2xJA040=
 github.com/opencontainers/image-spec v1.1.1/go.mod h1:qpqAh3Dmcf36wStyyWU+kCeDgrGnAve2nCC8+7h8Q0M=
+github.com/openweft/weft-microvm-init v0.2.4 h1:ys1Ly1ov28ur5lk1tt/AqnePeU7gDbkLqiJy6bH9GLo=
+github.com/openweft/weft-microvm-init v0.2.4/go.mod h1:Bd6WgttSFzHI5StkatATwmeMuVgHjz5wsOMWjsHr6fM=
+github.com/openweft/weft-proto v0.22.0 h1:7BU5Ra2QexF4DE56AaduNjzI8nXGRR6MvrH6G8ozGYY=
+github.com/openweft/weft-proto v0.22.0/go.mod h1:Yl6MNt1QtHdCKeGAWYfzNLsWTSakM/1aUzhx++Tu1Fc=
 github.com/openweft/weft-slognats v0.3.0 h1:g4a52kWtD6pE9xF89AwJScxqgmbeg1XrjlCjBuIR0y0=
 github.com/openweft/weft-slognats v0.3.0/go.mod h1:6szcJAzzSR8lT4S7weWHedDfbjDUf2mR9RXBNM5E4wI=
 github.com/pjbgf/sha1cd v0.6.0 h1:3WJ8Wz8gvDz29quX1OcEmkAlUg9diU4GxJHqs0/XiwU=

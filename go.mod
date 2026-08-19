@@ -7,8 +7,8 @@ require (
 	github.com/go-git/go-git/v5 v5.19.1
 	github.com/nats-io/nats-server/v2 v2.14.1
 	github.com/nats-io/nats.go v1.52.0
-	github.com/openweft/weft-microvm-init v0.2.2
-	github.com/openweft/weft-proto v0.14.0
+	github.com/openweft/weft-microvm-init v0.2.4
+	github.com/openweft/weft-proto v0.22.0
 	github.com/openweft/weft-slognats v0.3.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.52.0
@@ -78,9 +78,4 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c // indirect
-)
-
-replace (
-	github.com/openweft/weft-microvm-init => ../weft-microvm-init
-	github.com/openweft/weft-proto => ../weft-proto
 )
