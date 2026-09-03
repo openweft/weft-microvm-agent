@@ -27,19 +27,19 @@ import (
 	agentboot "github.com/openweft/weft-microvm-agent/pkg/boot"
 	agentcontainers "github.com/openweft/weft-microvm-agent/pkg/containers"
 	execsession "github.com/openweft/weft-microvm-agent/pkg/execsession"
-	"github.com/openweft/weft-microvm-agent/pkg/guestplane"
-	"github.com/openweft/weft-microvm-init/pkg/cubefs"
 	agentfirewall "github.com/openweft/weft-microvm-agent/pkg/firewall"
 	agentfirewallstatus "github.com/openweft/weft-microvm-agent/pkg/firewallstatus"
+	"github.com/openweft/weft-microvm-agent/pkg/guestplane"
 	"github.com/openweft/weft-microvm-agent/pkg/introspectsrv"
 	agentmesh "github.com/openweft/weft-microvm-agent/pkg/mesh"
 	agentmounts "github.com/openweft/weft-microvm-agent/pkg/mounts"
 	agentproperties "github.com/openweft/weft-microvm-agent/pkg/properties"
 	agentsshd "github.com/openweft/weft-microvm-agent/pkg/sshd"
 	agentsshkeys "github.com/openweft/weft-microvm-agent/pkg/sshkeys"
+	"github.com/openweft/weft-microvm-init/pkg/cubefs"
 	"github.com/openweft/weft-microvm-init/pkg/pod"
-	introspectv1 "github.com/openweft/weft-proto/introspectv1"
 	guestv1 "github.com/openweft/weft-proto/guestv1"
+	introspectv1 "github.com/openweft/weft-proto/introspectv1"
 	weftslognats "github.com/openweft/weft-slognats"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -785,15 +785,15 @@ func natsOptions(creds string) []nats.Option {
 //
 // Wire contract (the host MUST agree on these subjects) :
 //
-//   weft.containers.<vmID>          desired ContainerSet (JSON)
-//                                   StopPod  = empty set
-//                                   Update   = single-container set
-//   weft.containers.<vmID>.kill     KillContainer JSON {container_id,signal}
-//                                   (new subject ; no in-guest subscriber
-//                                    today — gap documented in main.go's
-//                                    containersVMID block)
-//   weft.exec.<vmID>.open           execsession.ExecRequest JSON
-//                                   (consumed by pkg/execsession.Subscriber)
+//	weft.containers.<vmID>          desired ContainerSet (JSON)
+//	                                StopPod  = empty set
+//	                                Update   = single-container set
+//	weft.containers.<vmID>.kill     KillContainer JSON {container_id,signal}
+//	                                (new subject ; no in-guest subscriber
+//	                                 today — gap documented in main.go's
+//	                                 containersVMID block)
+//	weft.exec.<vmID>.open           execsession.ExecRequest JSON
+//	                                (consumed by pkg/execsession.Subscriber)
 //
 // Logger is shared with the rest of the agent so a dispatch trace
 // reads in the same /var/log/weft-microvm-agent.log timeline as the

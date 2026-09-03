@@ -55,10 +55,10 @@ type Runtime interface {
 // running". Concurrent Apply-safe (one in flight at a time ; later
 // publishes during an apply wait).
 type Reconciler struct {
-	mu       sync.Mutex
-	runtime  Runtime
-	logger   *log.Logger
-	desired  map[string]pod.WorkloadContainer
+	mu      sync.Mutex
+	runtime Runtime
+	logger  *log.Logger
+	desired map[string]pod.WorkloadContainer
 }
 
 // NewReconciler builds a Reconciler over runtime. logger may be nil.
@@ -80,7 +80,7 @@ func NewReconciler(runtime Runtime, logger *log.Logger) *Reconciler {
 //     set (replace-by-name)
 //  3. for each add  : pull + start
 //     for each update: stop + start (the simplest semantics that
-//                      covers env / image / command changes)
+//     covers env / image / command changes)
 //     for each drop  : stop
 //
 // Returns the first error from a step ; subsequent ones still run so

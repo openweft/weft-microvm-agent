@@ -3,14 +3,14 @@
 // on `weft.exec.<vmID>.<sid>.open` (a JSON ExecRequest), then frames
 // flow over two ephemeral subjects :
 //
-//   weft.exec.<vmID>.<sid>.in   — frames TO the pty
-//                                  'i' + payload     stdin
-//                                  'r' + cols(u16) + rows(u16) resize
-//                                  'x'               eof / close
+//	weft.exec.<vmID>.<sid>.in   — frames TO the pty
+//	                               'i' + payload     stdin
+//	                               'r' + cols(u16) + rows(u16) resize
+//	                               'x'               eof / close
 //
-//   weft.exec.<vmID>.<sid>.out  — frames FROM the pty
-//                                  'o' + payload     stdout
-//                                  'e' + code(u32)  exited (process exit)
+//	weft.exec.<vmID>.<sid>.out  — frames FROM the pty
+//	                               'o' + payload     stdout
+//	                               'e' + code(u32)  exited (process exit)
 //
 // The same 1-byte-prefix wire shape as loom-server's existing
 // /api/projects/{p}/shell — so the SPA bridge can forward bytes
@@ -19,11 +19,11 @@
 //
 // Two target modes :
 //
-//   Target.Kind = "shell"   — spawn /bin/bash inside the VM root.
-//                              The default shell-tab session.
-//   Target.Kind = "exec"    — `crun exec <container>` with given
-//                              Command/Args. Used for compile jobs
-//                              + tool wrappers (`pdflatex` etc.)
+//	Target.Kind = "shell"   — spawn /bin/bash inside the VM root.
+//	                           The default shell-tab session.
+//	Target.Kind = "exec"    — `crun exec <container>` with given
+//	                           Command/Args. Used for compile jobs
+//	                           + tool wrappers (`pdflatex` etc.)
 //
 // Eviction : a session is closed when the input stream sends 'x',
 // the underlying process exits, or the open-publisher disconnects

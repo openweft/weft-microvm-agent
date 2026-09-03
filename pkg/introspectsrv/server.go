@@ -6,8 +6,8 @@ package introspectsrv
 import (
 	"context"
 
-	introspectv1 "github.com/openweft/weft-proto/introspectv1"
 	"github.com/openweft/weft-microvm-agent/pkg/procps"
+	introspectv1 "github.com/openweft/weft-proto/introspectv1"
 )
 
 // Server implements introspectv1.IntrospectServer.
