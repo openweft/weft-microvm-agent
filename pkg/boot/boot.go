@@ -123,9 +123,9 @@ type Runner struct {
 //
 //  1. sentinel check  (early return when already provisioned)
 //  2. pull            (git clone or oras pull into <WorkDir>/payload ;
-//                     skipped when SourceKind is empty)
+//     skipped when SourceKind is empty)
 //  3. script          (mvdan.cc/sh/v3 in payload CWD if it exists,
-//                     else WorkDir)
+//     else WorkDir)
 //  4. sentinel write  (only when everything above succeeded)
 func (r *Runner) Run(ctx context.Context, cfg Config) (err error) {
 	if r.SentinelPath == "" {

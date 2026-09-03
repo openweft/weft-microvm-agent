@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	introspectv1 "github.com/openweft/weft-proto/introspectv1"
 	"github.com/openweft/weft-microvm-agent/pkg/procps"
+	introspectv1 "github.com/openweft/weft-proto/introspectv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

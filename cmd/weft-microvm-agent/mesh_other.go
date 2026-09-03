@@ -5,8 +5,8 @@ package main
 import (
 	"fmt"
 
-	"github.com/openweft/weft-microvm-init/pkg/pod"
 	agentmesh "github.com/openweft/weft-microvm-agent/pkg/mesh"
+	"github.com/openweft/weft-microvm-init/pkg/pod"
 )
 
 // meshApply is unavailable off Linux — the agent only configures wg0 inside a
