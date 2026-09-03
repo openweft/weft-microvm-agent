@@ -2,6 +2,7 @@ package procps
 
 import (
 	"math"
+	"os/user"
 	"testing"
 )
 
@@ -33,8 +34,17 @@ func TestListFrom_Fixture(t *testing.T) {
 	if p1.State != "S" {
 		t.Errorf("pid1 state = %q, want S", p1.State)
 	}
-	if p1.User != "root" {
-		t.Errorf("pid1 user = %q, want root (uid 0)", p1.User)
+	// resolveUser maps a uid through os/user and is documented to fall back to
+	// the numeric form when no mapping exists. The fixture parsing under test
+	// is the same on every platform; the NAME is the host's to answer, and a
+	// Windows host has no uid 0, so it answers "0". Assert what the running
+	// host can actually resolve rather than asserting a Linux fact everywhere.
+	if _, err := user.LookupId("0"); err == nil {
+		if p1.User != "root" {
+			t.Errorf("pid1 user = %q, want root (uid 0)", p1.User)
+		}
+	} else if p1.User != "0" {
+		t.Errorf("pid1 user = %q, want the raw uid %q where uid 0 does not resolve", p1.User, "0")
 	}
 	if p1.VSZKB != 168944 {
 		t.Errorf("pid1 vsz = %d, want 168944", p1.VSZKB)
