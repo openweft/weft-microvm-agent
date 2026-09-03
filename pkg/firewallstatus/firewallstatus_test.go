@@ -248,16 +248,14 @@ func waitFor(t *testing.T, ch <-chan pod.FirewallStatus, d time.Duration) pod.Fi
 func okRead() pod.FirewallStatus { return pod.FirewallStatus{Overall: "Healthy"} }
 func silentLog() *log.Logger     { return log.New(os.NewFile(0, os.DevNull), "", 0) }
 
-// connectNATS dials the test server with a timeout an emulated machine can
-// meet.
+// connectNATS dials the test server, once, from one place.
 //
-// nats.Connect defaults to a 2s connect timeout, which is ample natively and is
-// not under qemu-user: the ppc64le lane failed here with "no servers available
-// for connection" while amd64 and s390x passed the same package. The server is
-// definitely listening by then -- natstest.RunServer waits on
-// ReadyForConnections(10s) and panics if it is not -- so the deadline is the
-// client's, and raising it weakens no assertion: the connection must still
-// succeed.
+// The generous timeout is NOT a fix for anything: it was written believing the
+// 2s default was what failed under qemu-user, and that is disproven -- with 30s
+// the emulated lanes still failed in 70ms, so the dial is refused outright. The
+// flake is undiagnosed and the emulated architectures skip this package for now
+// (see .github/workflows/ci.yml). The helper stays because five identical
+// connect-and-check blocks were five places to change.
 func connectNATS(t *testing.T, url string) *nats.Conn {
 	t.Helper()
 	nc, err := nats.Connect(url, nats.Timeout(30*time.Second))
