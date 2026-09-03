@@ -44,10 +44,7 @@ func TestRun_PublishesOnTickAndImmediate(t *testing.T) {
 	srv, url := startNATS(t)
 	defer srv.Shutdown()
 
-	nc, err := nats.Connect(url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := connectNATS(t, url)
 	defer nc.Close()
 
 	// Reader counts calls and varies the rule count so successive
@@ -107,10 +104,7 @@ func TestSetMetricsHook_FiresOnEveryPublish(t *testing.T) {
 	srv, url := startNATS(t)
 	defer srv.Shutdown()
 
-	nc, err := nats.Connect(url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := connectNATS(t, url)
 	defer nc.Close()
 
 	em, err := New(nc, "vm-hook", okRead, 30*time.Millisecond, silentLog())
@@ -152,10 +146,7 @@ func TestSetReadHook_FiresWithDropCountersFromRead(t *testing.T) {
 	srv, url := startNATS(t)
 	defer srv.Shutdown()
 
-	nc, err := nats.Connect(url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := connectNATS(t, url)
 	defer nc.Close()
 
 	// ReadFunc returns increasing drop counters across calls so the
@@ -209,10 +200,7 @@ func TestSetReadHook_NilIsSafe(t *testing.T) {
 	// leaves readHook nil ; the publish loop has to gate on it.
 	srv, url := startNATS(t)
 	defer srv.Shutdown()
-	nc, err := nats.Connect(url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := connectNATS(t, url)
 	defer nc.Close()
 
 	em, err := New(nc, "vm-nilread", okRead, time.Hour, silentLog())
@@ -231,10 +219,7 @@ func TestSetMetricsHook_NilHookIsSafe(t *testing.T) {
 	// use a live NATS conn but skip the hook wiring.
 	srv, url := startNATS(t)
 	defer srv.Shutdown()
-	nc, err := nats.Connect(url)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	nc := connectNATS(t, url)
 	defer nc.Close()
 
 	em, err := New(nc, "vm-nilhook", okRead, time.Hour, silentLog())
@@ -262,6 +247,25 @@ func waitFor(t *testing.T, ch <-chan pod.FirewallStatus, d time.Duration) pod.Fi
 
 func okRead() pod.FirewallStatus { return pod.FirewallStatus{Overall: "Healthy"} }
 func silentLog() *log.Logger     { return log.New(os.NewFile(0, os.DevNull), "", 0) }
+
+// connectNATS dials the test server with a timeout an emulated machine can
+// meet.
+//
+// nats.Connect defaults to a 2s connect timeout, which is ample natively and is
+// not under qemu-user: the ppc64le lane failed here with "no servers available
+// for connection" while amd64 and s390x passed the same package. The server is
+// definitely listening by then -- natstest.RunServer waits on
+// ReadyForConnections(10s) and panics if it is not -- so the deadline is the
+// client's, and raising it weakens no assertion: the connection must still
+// succeed.
+func connectNATS(t *testing.T, url string) *nats.Conn {
+	t.Helper()
+	nc, err := nats.Connect(url, nats.Timeout(30*time.Second))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	return nc
+}
 
 func startNATS(t *testing.T) (*natsserver.Server, string) {
 	t.Helper()
