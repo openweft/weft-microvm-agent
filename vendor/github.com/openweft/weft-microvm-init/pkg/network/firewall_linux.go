@@ -4,16 +4,17 @@
 // nftables table named "weft-fw" to a [[pod.Firewall]] desired state.
 //
 // Shape :
-//   table inet weft-fw {
-//     chain input  { type filter hook input  priority filter; policy drop ;
-//       ct state established,related accept
-//       iifname "lo" accept
-//       <per-rule allow lines>
-//     }
-//     chain output { type filter hook output priority filter; policy accept ;
-//       <per-rule egress drop lines if any>
-//     }
-//   }
+//
+//	table inet weft-fw {
+//	  chain input  { type filter hook input  priority filter; policy drop ;
+//	    ct state established,related accept
+//	    iifname "lo" accept
+//	    <per-rule allow lines>
+//	  }
+//	  chain output { type filter hook output priority filter; policy accept ;
+//	    <per-rule egress drop lines if any>
+//	  }
+//	}
 //
 // Reconcile is whole-state : we DELETE the table (if any) and
 // re-create it in one batched netlink flush, so an outside observer
@@ -52,6 +53,7 @@ var firewallMu sync.Mutex
 // The empty ruleset is valid and yields :
 //   - input  : default-deny except ct established/related + lo
 //   - output : default-accept
+//
 // This is the "no Security Group attached" baseline.
 func ApplyFirewall(fw *pod.Firewall) error {
 	firewallMu.Lock()

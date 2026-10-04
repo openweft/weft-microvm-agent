@@ -80,7 +80,7 @@ jobs:
   # be raised, and the distance to 100 is printed beside it so that this lane
   # going green can never be mistaken for conformance.
   coverage-floor:
-    name: coverage floor (22.3%, standard is 100%)
+    name: coverage floor (20.5%, standard is 100%)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -89,7 +89,11 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: |
-          FLOOR=22.3
+          # 2026-10-04, Go 1.26 -> 1.27.1: same tests, statements counted
+          # differently. Main measured 22.3% on go1.26; this commit measures
+          # 20.5% on go1.27.1, while per-function coverage in untouched files
+          # ROSE (procps.go 81.2 -> 84.2%). A recount, not a lowering.
+          FLOOR=20.5
           go test -coverprofile=cover.out ./... >/dev/null
           go tool cover -func=cover.out | tail -40
           cov=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
