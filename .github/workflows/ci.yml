@@ -121,11 +121,22 @@ jobs:
       # it compiles, and the fleet already carries 46 repositories that build
       # for six architectures and run on fewer.
       - run: GOARCH=${{ matrix.goarch }} go build ./...
-      - name: Install qemu-user-static
+      # ⛔ `qemu-user-static` is a VIRTUAL package on Ubuntu 26.04, which
+      # `ubuntu-latest` became on 2026-10-19, and apt refuses to choose between its
+      # two providers:
+      #
+      #   E: Package 'qemu-user-static' has no installation candidate
+      #
+      # ⚠ Installing a provider is NOT the fix: `qemu-user-binfmt` registers binfmt
+      # handlers, it does not ship the `qemu-<arch>-static` binaries this lane
+      # invokes. `qemu-user` ships the dynamic `qemu-<arch>`, which is all that
+      # `go test -exec` needs, so both are installed and BOTH NAMES are accepted
+      # below. go-tex/engine#645 has the full account.
+      - name: Install qemu user-mode emulators
         if: matrix.goarch != 'amd64' && matrix.goarch != 'arm64'
         run: |
           apt=(-y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          if timeout 240 sudo apt-get install "${apt[@]}" qemu-user-static; then
+          if timeout 240 sudo apt-get install "${apt[@]}" qemu-user qemu-user-binfmt; then
             exit 0
           fi
           for attempt in 1 2; do
@@ -133,11 +144,11 @@ jobs:
             timeout 240 sudo apt-get update "${apt[@]}" || true
             sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
             sudo dpkg --configure -a || true
-            if timeout 240 sudo apt-get install "${apt[@]}" qemu-user-static; then
+            if timeout 240 sudo apt-get install "${apt[@]}" qemu-user qemu-user-binfmt; then
               exit 0
             fi
           done
-          echo "::error::qemu-user-static could not be installed"
+          echo "::error::qemu-user qemu-user-binfmt could not be installed"
           exit 1
       # amd64 and arm64 run the WHOLE suite natively.
       #
@@ -162,10 +173,21 @@ jobs:
         run: |
           SKIP='github.com/openweft/weft-microvm-agent/pkg/firewallstatus'
           pkgs() { go list ./... | grep -v "^${SKIP}$"; }
+          # ⛔ Resolve the emulator, accept EITHER binary name, and FAIL when neither
+          # is there -- a lane that reports success for an architecture it never ran is
+          # the one outcome this matrix exists to rule out. qemu-user ships the dynamic
+          # qemu-<arch>; qemu-user-static, now a virtual package, shipped the static one.
+          qemu_for() {
+            for cand in "qemu-$1-static" "qemu-$1"; do
+              command -v "$cand" >/dev/null 2>&1 && { printf '%s\n' "$cand"; return 0; }
+            done
+            echo "::error::no qemu user emulator for $1 (looked for qemu-$1-static and qemu-$1)" >&2
+            return 1
+          }
           case "${{ matrix.goarch }}" in
             amd64|arm64) go test ./... ;;
-            riscv64)  GOARCH=riscv64 go test -exec=qemu-riscv64-static $(pkgs) ;;
-            loong64)  GOARCH=loong64 go test -exec=qemu-loongarch64-static $(pkgs) ;;
-            ppc64le)  GOARCH=ppc64le go test -exec=qemu-ppc64le-static $(pkgs) ;;
-            s390x)    GOARCH=s390x   go test -exec=qemu-s390x-static $(pkgs) ;;
+            riscv64) e="$(qemu_for riscv64)" || exit 1; echo "running riscv64 under $e"; GOARCH=riscv64 go test -exec="$e" $(pkgs) ;;
+            loong64) e="$(qemu_for loongarch64)" || exit 1; echo "running loong64 under $e"; GOARCH=loong64 go test -exec="$e" $(pkgs) ;;
+            ppc64le) e="$(qemu_for ppc64le)" || exit 1; echo "running ppc64le under $e"; GOARCH=ppc64le go test -exec="$e" $(pkgs) ;;
+            s390x) e="$(qemu_for s390x)" || exit 1; echo "running s390x under $e"; GOARCH=s390x   go test -exec="$e" $(pkgs) ;;
           esac
