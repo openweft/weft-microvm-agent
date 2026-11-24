@@ -253,7 +253,7 @@ func (s *Subscriber) Start(ctx context.Context) (*nats.Subscription, error) {
 			s.logger.Printf("containers: apply error: %v", err)
 		}
 		_ = m.Ack()
-	}, nats.DeliverLastPerSubject(), nats.AckExplicit())
+	}, nats.BindStream(streamName), nats.DeliverLastPerSubject(), nats.AckExplicit())
 	if err != nil {
 		return nil, fmt.Errorf("subscribe: %w", err)
 	}
