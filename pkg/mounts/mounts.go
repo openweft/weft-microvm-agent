@@ -125,7 +125,11 @@ func (s *Subscriber) Start() (*nats.Subscription, error) {
 	// DeliverLastPerSubject : on connect, replay the most recent
 	// message per subject — exactly the state the agent needs to
 	// reconstruct its desired mounts.
+	// BindStream: without it nats.go looks the stream up by subject
+	// ($JS.API.STREAM.NAMES), which a restricted guest credential may not
+	// publish to.
 	sub, err := js.Subscribe(Subject(s.vmID), handler,
+		nats.BindStream(streamName),
 		nats.DeliverLastPerSubject(),
 		nats.AckNone(),
 	)
