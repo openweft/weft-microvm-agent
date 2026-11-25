@@ -14,6 +14,7 @@
 package network
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 
 	wgtransport "github.com/grpc-transports/wireguard"
 	"github.com/openweft/weft-microvm-init/pkg/pod"
+	"github.com/openweft/weft-microvm-init/pkg/secretclient"
 )
 
 // applier holds the BringUp Closer across re-applies. When the host
@@ -40,10 +42,30 @@ var (
 // ApplyWireGuard creates the WireGuard interface, configures its device
 // (key, port, peers) and brings it up with the overlay address. Idempotent:
 // re-applying replaces peers and re-asserts the address.
+//
+// It has no secret source, so a spec naming a private_key_ref is refused;
+// use ApplyWireGuardWith for that.
 func ApplyWireGuard(wg *pod.WireGuard) error {
+	return ApplyWireGuardWith(context.Background(), wg, nil)
+}
+
+// ApplyWireGuardWith is ApplyWireGuard with a secret source: a
+// private_key_ref is fetched over vsock, staged to a 0600 tmpfs file for the
+// WireGuard library, and wiped from memory afterwards. An inline private_key
+// still works, with a loud warning; both set is an error.
+func ApplyWireGuardWith(ctx context.Context, wg *pod.WireGuard, src secretclient.Source) error {
 	if wg == nil {
 		return nil
 	}
+	key, wipe, err := resolveWireGuardKey(ctx, wg, src)
+	if err != nil {
+		return err
+	}
+	defer wipe()
+	return applyWireGuard(wg, key)
+}
+
+func applyWireGuard(wg *pod.WireGuard, key []byte) error {
 	iface := wg.Interface
 	if iface == "" {
 		iface = "wg0"
@@ -52,12 +74,14 @@ func ApplyWireGuard(wg *pod.WireGuard) error {
 	// Validate the private key locally so we surface the same error the
 	// legacy path produced ("must be N bytes") rather than the lib's
 	// "decode key: invalid base64" deeper down the stack.
-	priv, err := base64.StdEncoding.DecodeString(wg.PrivateKey)
+	priv := make([]byte, base64.StdEncoding.DecodedLen(len(key)))
+	n, err := base64.StdEncoding.Decode(priv, key)
+	clear(priv)
 	if err != nil {
-		return fmt.Errorf("wireguard private_key: %w", err)
+		return errors.New("wireguard private_key: invalid base64")
 	}
-	if len(priv) != keyLen {
-		return fmt.Errorf("wireguard private_key must be %d bytes, got %d", keyLen, len(priv))
+	if n != keyLen {
+		return fmt.Errorf("wireguard private_key must be %d bytes, got %d", keyLen, n)
 	}
 
 	// Parse the overlay address up-front so a malformed CIDR fails fast,
@@ -87,7 +111,7 @@ func ApplyWireGuard(wg *pod.WireGuard) error {
 	// rather than an inline key for ServerConfig; the simplest
 	// faithful answer is to materialise wg.PrivateKey to a tmpfile
 	// we then point at.
-	keyPath, err := stagePrivateKey(wg.PrivateKey)
+	keyPath, err := stagePrivateKey(key)
 	if err != nil {
 		return err
 	}
@@ -135,12 +159,20 @@ func ApplyWireGuard(wg *pod.WireGuard) error {
 // tmpfile so wgtransport.ServerConfig.PrivateKeyPath has something to
 // point at. The lib only accepts a path; we'd rather not hand it a
 // long-lived on-disk key just because it lacks an inline-key field.
-func stagePrivateKey(b64 string) (string, error) {
-	f, err := os.CreateTemp("", "wg-priv-*")
+func stagePrivateKey(b64 []byte) (string, error) {
+	// /run is the tmpfs weft-init mounts first, so the key never reaches a
+	// disk-backed filesystem; fall back to the default temp dir without it.
+	f, err := os.CreateTemp("/run", "wg-priv-*")
+	if err != nil {
+		f, err = os.CreateTemp("", "wg-priv-*")
+	}
 	if err != nil {
 		return "", fmt.Errorf("stage wg private key: %w", err)
 	}
-	if _, err := f.WriteString(b64 + "\n"); err != nil {
+	line := append(append(make([]byte, 0, len(b64)+1), b64...), '\n')
+	_, err = f.Write(line)
+	clear(line)
+	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
 		return "", fmt.Errorf("stage wg private key: %w", err)

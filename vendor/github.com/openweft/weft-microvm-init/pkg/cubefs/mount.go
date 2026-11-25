@@ -2,6 +2,7 @@ package cubefs
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/openweft/weft-microvm-init/pkg/pod"
+	"github.com/openweft/weft-microvm-init/pkg/secretclient"
 )
 
 // runRoot is where per-mount cfs-client config + logs live.
@@ -23,7 +25,12 @@ type Mounted struct {
 	cmd        *exec.Cmd
 	logf       *os.File      // owned; closed on Unmount
 	exited     chan struct{} // closed by the reaper goroutine once cmd has exited
+
+	secretVersion uint64 // CubeFSMount.SecretVersion the mount was made with
 }
+
+// SecretVersion reports the secret_version the mount was made with.
+func (m *Mounted) SecretVersion() uint64 { return m.secretVersion }
 
 // MountPoint reports where the share is mounted in the guest.
 func (m *Mounted) MountPoint() string { return m.mountPoint }
@@ -70,7 +77,9 @@ func Mount(spec pod.ShareMount) (*Mounted, error) {
 		return nil, err
 	}
 	cfgPath := filepath.Join(runDir, "config.json")
-	if err := os.WriteFile(cfgPath, cfg, 0o600); err != nil {
+	err = os.WriteFile(cfgPath, cfg, 0o600)
+	clear(cfg) // the rendered config holds the keys
+	if err != nil {
 		return nil, fmt.Errorf("write cfs-client config: %w", err)
 	}
 
@@ -103,7 +112,8 @@ func Mount(spec pod.ShareMount) (*Mounted, error) {
 		}
 		return nil, fmt.Errorf("cubefs %q: %w", spec.ID, err)
 	}
-	return &Mounted{mountPoint: spec.MountPoint, cmd: cmd, logf: logf, exited: exited}, nil
+	return &Mounted{mountPoint: spec.MountPoint, cmd: cmd, logf: logf, exited: exited,
+		secretVersion: spec.CubeFS.SecretVersion}, nil
 }
 
 // waitMounted polls /proc/mounts until target appears as a mount or the
@@ -160,19 +170,41 @@ func unmountPath(target string) error {
 // replace-by-ID or unmount idempotently. Safe for concurrent use by the
 // event-bus apply callback.
 type Registry struct {
-	mu     sync.Mutex
-	active map[string]*Mounted
+	mu      sync.Mutex
+	active  map[string]*Mounted
+	secrets secretclient.Source
+	mount   func(pod.ShareMount) (*Mounted, error) // Mount; a test seam
 }
 
-func NewRegistry() *Registry { return &Registry{active: map[string]*Mounted{}} }
+// NewRegistry returns a Registry with no secret source: a mount that names a
+// *_ref is refused. Use NewRegistryWithSecrets to resolve them.
+func NewRegistry() *Registry { return NewRegistryWithSecrets(nil) }
+
+// NewRegistryWithSecrets returns a Registry that resolves *_ref keys from src
+// (the vsock GuestSecrets client in production).
+func NewRegistryWithSecrets(src secretclient.Source) *Registry {
+	return &Registry{active: map[string]*Mounted{}, secrets: src, mount: Mount}
+}
 
 // Apply reconciles one ShareMount against the registry: unmount on the
 // unmount action, otherwise (re)mount, replacing any existing mount with
 // the same ID. Idempotent — a repeated publish re-establishes the mount.
+//
+// Keys named by *_ref are fetched over vsock BEFORE the existing mount is
+// touched, so a failed fetch leaves the old mount up. Rotation is a message
+// with a new secret_version: the remount here fetches the current value.
 func (r *Registry) Apply(spec pod.ShareMount) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if spec.Action != pod.MountActionUnmount {
+		resolved, wipe, err := Resolve(context.Background(), spec, r.secrets)
+		if err != nil {
+			return err
+		}
+		defer wipe()
+		spec = resolved
+	}
 	if existing := r.active[spec.ID]; existing != nil {
 		if err := existing.Unmount(); err != nil {
 			return err
@@ -182,7 +214,7 @@ func (r *Registry) Apply(spec pod.ShareMount) error {
 	if spec.Action == pod.MountActionUnmount {
 		return nil
 	}
-	m, err := Mount(spec)
+	m, err := r.mount(spec)
 	if err != nil {
 		return err
 	}
