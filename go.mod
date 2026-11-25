@@ -7,7 +7,7 @@ require (
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/nats-io/nats-server/v2 v2.14.1
 	github.com/nats-io/nats.go v1.52.0
-	github.com/openweft/weft-microvm-init v0.4.0
+	github.com/openweft/weft-microvm-init v0.4.1
 	github.com/openweft/weft-proto v0.24.0
 	github.com/openweft/weft-slognats v0.3.0
 	github.com/prometheus/client_golang v1.23.2

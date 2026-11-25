@@ -7,6 +7,15 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-25
+
+### Added
+
+- **Boot token on GuestSecrets fetches** : the vsock client now sends the
+  per-boot token read once from the QEMU fw_cfg entry
+  `opt/org.weft/boot-token` (32 raw bytes, memory only; absent = no token,
+  wrong length = error). Bumps `weft-microvm-init` to v0.4.1.
+
 ## [0.5.0] - 2026-11-25
 
 ### Added
