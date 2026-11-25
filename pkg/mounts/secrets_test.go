@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -26,12 +28,16 @@ type hostSecrets struct {
 	mu      sync.Mutex
 	secrets map[string]*guestv1.FetchResponse
 	calls   int
+	token   []byte // when set, the boot token every request must carry
 }
 
 func (h *hostSecrets) Fetch(_ context.Context, r *guestv1.FetchRequest) (*guestv1.FetchResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.calls++
+	if h.token != nil && !bytes.Equal(h.token, r.BootToken) {
+		return nil, status.Error(codes.PermissionDenied, "denied")
+	}
 	s, ok := h.secrets[r.SecretId]
 	if !ok {
 		return nil, status.Error(codes.PermissionDenied, "denied")
@@ -185,6 +191,28 @@ func TestDynamicMountOversizeSecretIsRefused(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatal("mounted with an oversize secret")
+	}
+}
+
+func TestDynamicMountSendsTheFwCfgBootToken(t *testing.T) {
+	h, c := newHost(t)
+	h.set("team-ak", "AK1", 1)
+	h.set("team-sk", "SK1", 1)
+	h.token = bytes.Repeat([]byte{0x42}, secretclient.TokenLen)
+	var got []pod.ShareMount
+
+	// no token: the host denies
+	if err := HandleMessage(refMessage(t, nil), applier(c, &got)); err == nil || len(got) != 0 {
+		t.Fatalf("tokenless fetch accepted: %v", err)
+	}
+	// the token read from the (fake) fw_cfg file is sent
+	p := filepath.Join(t.TempDir(), "raw")
+	if err := os.WriteFile(p, h.token, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.Token = secretclient.FileTokenSource(p)
+	if err := HandleMessage(refMessage(t, nil), applier(c, &got)); err != nil || len(got) != 1 {
+		t.Fatalf("err=%v mounts=%d", err, len(got))
 	}
 }
 
