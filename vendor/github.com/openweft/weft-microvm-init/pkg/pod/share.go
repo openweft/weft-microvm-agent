@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/openweft/weft-microvm-init/pkg/secretclient"
 )
 
 // MountAction distinguishes a mount request from an unmount on the event
@@ -74,8 +76,39 @@ type CubeFSMount struct {
 	AccessKey string `json:"access_key,omitempty"`
 	SecretKey string `json:"secret_key,omitempty"`
 
+	// AccessKeyRef / SecretKeyRef are GuestSecrets secret IDs: the guest
+	// fetches the value over vsock instead of reading it from the message.
+	// Each is mutually exclusive with its inline field above (deprecated).
+	AccessKeyRef string `json:"access_key_ref,omitempty"`
+	SecretKeyRef string `json:"secret_key_ref,omitempty"`
+
+	// SecretVersion is the version of SecretKeyRef the publisher expects; a
+	// higher value than the mount was made with means "fetch again"
+	// (rotation = unmount + remount).
+	SecretVersion uint64 `json:"secret_version,omitempty"`
+
 	// SubDir optionally mounts only a subtree of the volume.
 	SubDir string `json:"subdir,omitempty"`
+}
+
+// ValidateSecrets refuses a ref set together with its inline field, and a
+// malformed ref.
+func (c *CubeFSMount) ValidateSecrets() error {
+	for _, f := range []struct{ name, inline, ref string }{
+		{"access_key", c.AccessKey, c.AccessKeyRef},
+		{"secret_key", c.SecretKey, c.SecretKeyRef},
+	} {
+		if f.ref == "" {
+			continue
+		}
+		if f.inline != "" {
+			return fmt.Errorf("cubefs.%s and cubefs.%s_ref are both set", f.name, f.name)
+		}
+		if !secretclient.ValidID(f.ref) {
+			return fmt.Errorf("cubefs.%s_ref is not a valid secret id", f.name)
+		}
+	}
+	return nil
 }
 
 func (m *ShareMount) backend() string {
@@ -113,6 +146,9 @@ func (m *ShareMount) Validate() error {
 		}
 		if m.CubeFS.Owner == "" {
 			return fmt.Errorf("mount %q: cubefs.owner is required", m.ID)
+		}
+		if err := m.CubeFS.ValidateSecrets(); err != nil {
+			return fmt.Errorf("mount %q: %w", m.ID, err)
 		}
 	default:
 		return fmt.Errorf("mount %q: unsupported backend %q", m.ID, m.Backend)

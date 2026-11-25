@@ -7,6 +7,23 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-25
+
+### Added
+
+- **Guest secrets on dynamic mounts** : a `weft.mounts.<vmID>` message may
+  carry `access_key_ref` / `secret_key_ref` (GuestSecrets secret ids) and a
+  `secret_version` instead of inline keys. The agent fetches them over
+  AF_VSOCK (`--guestplane-port`, default 7777) from the host's
+  `weft.guest.v1.GuestSecrets/Fetch`, wipes the buffers once the cfs-client
+  config (0600) is written, and refetches when a re-published message
+  carries a different `secret_version` (rotation = unmount + remount). A
+  failed fetch leaves the existing mount up. A ref set together with its
+  inline field is refused. Inline keys still work, with a deprecation
+  warning. Off Linux there is no vsock transport: refs are refused.
+- Bumps `weft-microvm-init` to v0.4.0 and `weft-proto` to v0.24.0. The
+  `BindStream` fix of v0.4.3 is untouched.
+
 ## [0.3.1] - 2026-06-14
 
 ### Fixed

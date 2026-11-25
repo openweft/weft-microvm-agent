@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/openweft/weft-microvm-init/pkg/secretclient"
 )
 
 // LoadWireGuard reads a standalone WireGuard overlay config (the same shape
@@ -35,8 +37,13 @@ func LoadWireGuard(path string) (*WireGuard, error) {
 // Validate checks the overlay config has the minimum fields the kernel
 // configuration needs.
 func (w *WireGuard) Validate() error {
-	if w.PrivateKey == "" {
-		return fmt.Errorf("private_key is required")
+	switch {
+	case w.PrivateKey != "" && w.PrivateKeyRef != "":
+		return fmt.Errorf("private_key and private_key_ref are both set")
+	case w.PrivateKey == "" && w.PrivateKeyRef == "":
+		return fmt.Errorf("private_key or private_key_ref is required")
+	case w.PrivateKeyRef != "" && !secretclient.ValidID(w.PrivateKeyRef):
+		return fmt.Errorf("private_key_ref is not a valid secret id")
 	}
 	if w.Address == "" {
 		return fmt.Errorf("address is required")

@@ -193,7 +193,10 @@ func run(o opts) error {
 
 	// One registry backs both boot-time and dynamic share mounts, so a
 	// dynamic unmount can target a boot-time mount by ID.
-	reg := cubefs.NewRegistry()
+	// A mount message may carry *_ref secret ids (and a secret_version):
+	// the registry fetches them over vsock from the host's GuestSecrets and
+	// refetches whenever a re-published message changes secret_version.
+	reg := cubefs.NewRegistryWithSecrets(newSecretSource(o.guestPlanePort))
 
 	if o.shareMounts != "" {
 		if err := applyBootMounts(o.shareMounts, reg, logger); err != nil {

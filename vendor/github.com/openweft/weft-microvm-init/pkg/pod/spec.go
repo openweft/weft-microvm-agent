@@ -78,11 +78,15 @@ type Network struct {
 // other VMs, or to be reached by an operator CLI. Keys are base64-encoded
 // 32-byte Curve25519 values, matching `wg`'s textual form.
 type WireGuard struct {
-	Interface  string   `json:"interface,omitempty"`   // default "wg0"
-	PrivateKey string   `json:"private_key"`           // base64, 32 bytes
-	ListenPort uint16   `json:"listen_port,omitempty"` // UDP underlay port; 0 = ephemeral
-	Address    string   `json:"address"`               // overlay CIDR, e.g. "10.9.0.1/24"
-	Peers      []WGPeer `json:"peers,omitempty"`
+	Interface  string `json:"interface,omitempty"`   // default "wg0"
+	PrivateKey string `json:"private_key,omitempty"` // base64, 32 bytes; deprecated, see PrivateKeyRef
+	// PrivateKeyRef is a GuestSecrets secret ID: the guest fetches the
+	// base64 key over vsock instead of reading it from the spec. Mutually
+	// exclusive with PrivateKey.
+	PrivateKeyRef string   `json:"private_key_ref,omitempty"`
+	ListenPort    uint16   `json:"listen_port,omitempty"` // UDP underlay port; 0 = ephemeral
+	Address       string   `json:"address"`               // overlay CIDR, e.g. "10.9.0.1/24"
+	Peers         []WGPeer `json:"peers,omitempty"`
 }
 
 // WGPeer is one authorized WireGuard peer on the overlay.
